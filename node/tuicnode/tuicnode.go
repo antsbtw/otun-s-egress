@@ -157,6 +157,9 @@ func (n *Node) UpdateUsers(users []userattr.User) error {
 		passwords[i] = pwByUUID[id]
 	}
 	n.service.UpdateUsers(diff.Indices, uuidBytes, passwords)
+	for _, uuid := range diff.Removed {
+		n.meter.EvictUser(uuid) // R1 delete → force-close + drop from billing
+	}
 	return nil
 }
 
@@ -235,6 +238,9 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		}
 		defer outbound.Close()
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
+		if uuid, ok := h.node.uuidFor(ctx); ok {
+			conn = h.node.meter.TrackPacket(uuid, conn) // R2: count UDP up/down per user
+		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()
 }

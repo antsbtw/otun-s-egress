@@ -18,6 +18,10 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+
+	"github.com/sagernet/sing/common/buf"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 )
 
 // UserStat is a user's accumulated traffic since the last reset.
@@ -27,12 +31,28 @@ type UserStat struct {
 	Download int64 // target -> client bytes
 }
 
+// liveConn is a tracked connection (stream or packet) that can be force-closed
+// on kick. Both trackedConn and trackedPacketConn satisfy it.
+type liveConn interface{ Close() error }
+
 type userState struct {
 	up   atomic.Int64
 	down atomic.Int64
 	// conns is the set of live connections for this user, for KickUser.
 	mu    sync.Mutex
-	conns map[*trackedConn]struct{}
+	conns map[liveConn]struct{}
+}
+
+func (s *userState) add(c liveConn) {
+	s.mu.Lock()
+	s.conns[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *userState) remove(c liveConn) {
+	s.mu.Lock()
+	delete(s.conns, c)
+	s.mu.Unlock()
 }
 
 // Registry is a node's per-user meter + connection registry. Safe for concurrent
@@ -52,23 +72,31 @@ func (r *Registry) state(uuid string) *userState {
 	defer r.mu.Unlock()
 	s := r.users[uuid]
 	if s == nil {
-		s = &userState{conns: map[*trackedConn]struct{}{}}
+		s = &userState{conns: map[liveConn]struct{}{}}
 		r.users[uuid] = s
 	}
 	return s
 }
 
-// Track wraps conn so its byte counts accrue to uuid and it is force-closable via
-// KickUser(uuid). Call once per accepted egress connection; the returned conn is
-// used in place of the original for the bidirectional copy. unregister the conn
-// (via the returned conn's Close, which is automatic) when the copy ends.
+// Track wraps a STREAM conn so its byte counts accrue to uuid and it is
+// force-closable via KickUser(uuid). Call once per accepted egress stream; use
+// the returned conn for the bidirectional copy. It unregisters on Close.
 func (r *Registry) Track(uuid string, conn net.Conn) net.Conn {
 	s := r.state(uuid)
 	tc := &trackedConn{Conn: conn, state: s}
-	s.mu.Lock()
-	s.conns[tc] = struct{}{}
-	s.mu.Unlock()
+	s.add(tc)
 	return tc
+}
+
+// TrackPacket wraps a PACKET conn so its byte counts accrue to uuid (ReadPacket =
+// upload from client, WritePacket = download to client) and it is force-closable
+// via KickUser(uuid). Symmetric to Track for the UDP path (hy2/tuic). Unregisters
+// on Close.
+func (r *Registry) TrackPacket(uuid string, conn N.PacketConn) N.PacketConn {
+	s := r.state(uuid)
+	tp := &trackedPacketConn{PacketConn: conn, state: s}
+	s.add(tp)
+	return tp
 }
 
 // CollectStats returns every user's up/down totals. reset=true atomically zeroes
@@ -103,15 +131,29 @@ func (r *Registry) KickUser(uuid string) int {
 		return 0
 	}
 	s.mu.Lock()
-	conns := make([]*trackedConn, 0, len(s.conns))
-	for tc := range s.conns {
-		conns = append(conns, tc)
+	conns := make([]liveConn, 0, len(s.conns))
+	for c := range s.conns {
+		conns = append(conns, c)
 	}
 	s.mu.Unlock()
-	for _, tc := range conns {
-		_ = tc.Close() // trackedConn.Close unregisters from the set + closes
+	for _, c := range conns {
+		_ = c.Close() // Close unregisters from the set + closes
 	}
 	return len(conns)
+}
+
+// EvictUser kicks a user's live connections AND drops its state from the
+// registry (so CollectStats no longer returns a ghost row). Used on user removal
+// (R1 delete linkage): the removed user must both lose its live tunnels (R3) and
+// disappear from billing. Returns the number of connections closed. Any bytes on
+// those connections that had not yet been collected are dropped with the state —
+// callers that need a final bill should CollectStats(true) before evicting.
+func (r *Registry) EvictUser(uuid string) int {
+	kicked := r.KickUser(uuid)
+	r.mu.Lock()
+	delete(r.users, uuid)
+	r.mu.Unlock()
+	return kicked
 }
 
 // trackedConn is a net.Conn whose Read/Write increment its user's counters and
@@ -143,10 +185,39 @@ func (t *trackedConn) Write(b []byte) (int, error) {
 }
 
 func (t *trackedConn) Close() error {
-	t.closeOnce.Do(func() {
-		t.state.mu.Lock()
-		delete(t.state.conns, t)
-		t.state.mu.Unlock()
-	})
+	t.closeOnce.Do(func() { t.state.remove(t) })
 	return t.Conn.Close()
+}
+
+// trackedPacketConn is the UDP counterpart of trackedConn: ReadPacket counts
+// upload (client -> target), WritePacket counts download (target -> client). It
+// wraps the CLIENT-side N.PacketConn in the node's UDP egress copy, so byte
+// direction matches trackedConn. Unregisters from the user's live set on Close.
+type trackedPacketConn struct {
+	N.PacketConn
+	state     *userState
+	closeOnce sync.Once
+}
+
+func (t *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
+	before := buffer.Len()
+	dest, err := t.PacketConn.ReadPacket(buffer)
+	if n := buffer.Len() - before; n > 0 {
+		t.state.up.Add(int64(n))
+	}
+	return dest, err
+}
+
+func (t *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
+	n := buffer.Len()
+	err := t.PacketConn.WritePacket(buffer, destination)
+	if err == nil && n > 0 {
+		t.state.down.Add(int64(n))
+	}
+	return err
+}
+
+func (t *trackedPacketConn) Close() error {
+	t.closeOnce.Do(func() { t.state.remove(t) })
+	return t.PacketConn.Close()
 }

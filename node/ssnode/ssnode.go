@@ -159,7 +159,13 @@ func (n *Node) UpdateUsers(users []userattr.User) error {
 	for i, id := range diff.UUIDs {
 		passwords[i] = pwByUUID[id]
 	}
-	return n.service.UpdateUsersWithPasswords(diff.Indices, passwords)
+	if err := n.service.UpdateUsersWithPasswords(diff.Indices, passwords); err != nil {
+		return err
+	}
+	for _, uuid := range diff.Removed {
+		n.meter.EvictUser(uuid) // R1 delete → force-close + drop from billing
+	}
+	return nil
 }
 
 // UUIDForIndex reverse-resolves an authenticated index to its UUID (R2 metering).

@@ -148,6 +148,9 @@ func (n *Node) UpdateUsers(users []userattr.User) error {
 		flows[i] = flowByUUID[id]
 	}
 	n.vless.UpdateUsers(diff.Indices, diff.UUIDs, flows)
+	for _, uuid := range diff.Removed {
+		n.meter.EvictUser(uuid) // R1 delete → force-close + drop from billing
+	}
 	return nil
 }
 
