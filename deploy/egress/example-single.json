@@ -1,0 +1,11 @@
+{
+  "protocol": "hysteria2",
+  "server_url": "http://54.255.172.86:9443",
+  "token": "REPLACE_WITH_REALM_TOKEN",
+  "realm_id": "m1-hy2-out",
+  "stun_servers": ["74.125.250.129:19302", "162.159.207.0:3478"],
+  "listen": ":51820",
+  "password": "m1-hy2-pw",
+  "sni": "iptv.local",
+  "alpn": ["h3"]
+}

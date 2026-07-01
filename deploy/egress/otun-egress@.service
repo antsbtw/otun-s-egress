@@ -1,0 +1,31 @@
+[Unit]
+# systemd TEMPLATE unit for an OTun egress node. One instance per realm slot:
+#   otun-egress@m1-hy2.service  -> config /etc/otun/egress/m1-hy2.json
+#   otun-egress@m3-tuic.service -> config /etc/otun/egress/m3-tuic.json
+# Enable+start a slot:  systemctl enable --now otun-egress@m1-hy2
+# This is the deploy-package replacement for `nohup /tmp/otun-... &`.
+Description=OTun egress node (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/otun-egress -config /etc/otun/egress/%i.json
+Restart=always
+RestartSec=2
+# Egress only needs to open UDP sockets + dial out; no privileged ports required
+# for the high listen ports (51820+). Run as a dedicated unprivileged user.
+User=otun
+Group=otun
+# Hardening (safe for a userspace egress proxy).
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/otun
+AmbientCapabilities=
+# Keep file-descriptor headroom for many concurrent proxied connections.
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

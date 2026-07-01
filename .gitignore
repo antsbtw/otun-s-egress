@@ -1,0 +1,10 @@
+# build artifacts
+/otun-egress
+/otun-egress-*
+/otun-hy2-node
+/otun-node
+/otun-reality-node
+/otun-tuic-node
+*.log
+# macOS
+.DS_Store

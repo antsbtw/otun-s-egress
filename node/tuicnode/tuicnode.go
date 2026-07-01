@@ -1,0 +1,184 @@
+// Package tuicnode is OTun's TUIC egress node agent — the server-side mirror of
+// overlay/tuic. It is needed because stock sing-box's TUIC has NO realm field
+// (only Hy2 does), so a TUIC egress that registers on the rendezvous and answers
+// hole punches does not exist upstream. OTun builds it.
+//
+// Shape (same "OTun owns the glue, engine is a library" pattern as M3):
+//
+//	realm.Server  — registers on OTun-S, STUN-discovers, answers punches,
+//	                hands up a punched *PunchPacketConn (the UDP hole).
+//	tuic.Service  — imported from sing-quic (no fork); its QUIC listener runs
+//	                straight on the punched hole.
+//	egress handler— dials each proxied destination on the open internet and
+//	                pipes bytes both ways (this is what makes it an egress).
+//
+// A client (overlay/tuic) punches to this node through the same rendezvous and
+// gets a TUIC tunnel whose traffic exits this node's IP.
+package tuicnode
+
+import (
+	"context"
+	"net"
+	"net/http"
+	"time"
+
+	squic "github.com/sagernet/sing-quic/hysteria2/realm"
+	singtuic "github.com/sagernet/sing-quic/tuic"
+	"github.com/sagernet/sing/common/bufio"
+	E "github.com/sagernet/sing/common/exceptions"
+	"github.com/sagernet/sing/common/logger"
+	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
+	aTLS "github.com/sagernet/sing/common/tls"
+)
+
+// Options configures a TUIC egress node.
+type Options struct {
+	// Rendezvous coordinates (protocol-agnostic).
+	ServerURL   string // OTun-S base URL
+	Token       string // realm token
+	RealmID     string // slot to register under
+	STUNServers []string
+	Resolver    squic.Resolver
+	HTTPClient  *http.Client // rendezvous HTTP client; nil => http.DefaultClient
+
+	// TUIC server params.
+	TLSConfig         aTLS.ServerConfig // caller-built (cert/key); required
+	UUID              [16]byte
+	Password          string
+	CongestionControl string // "" => cubic
+
+	// Egress dials proxied destinations from this node. If nil, a plain
+	// net.Dialer is used (exit = this node's default route / public IP).
+	Egress N.Dialer
+	Logger logger.Logger
+}
+
+// Node is a running TUIC egress node.
+type Node struct {
+	realm   *squic.Server
+	service *singtuic.Service[int]
+	logger  logger.Logger
+}
+
+// New builds (but does not start) a TUIC egress node.
+func New(opts Options) (*Node, error) {
+	if opts.TLSConfig == nil {
+		return nil, E.New("tuicnode: TLS server config is required")
+	}
+	if opts.Logger == nil {
+		opts.Logger = logger.NOP()
+	}
+	egress := opts.Egress
+	if egress == nil {
+		egress = systemDialer{}
+	}
+	realmServer, err := squic.NewServer(squic.Options{
+		ServerURL:   opts.ServerURL,
+		Token:       opts.Token,
+		RealmID:     opts.RealmID,
+		STUNServers: opts.STUNServers,
+		Resolver:    opts.Resolver,
+		HTTPClient:  opts.HTTPClient,
+		Logger:      opts.Logger,
+	})
+	if err != nil {
+		return nil, E.Cause(err, "create realm server")
+	}
+	service, err := singtuic.NewService[int](singtuic.ServiceOptions{
+		Context:           context.Background(),
+		Logger:            opts.Logger,
+		TLSConfig:         opts.TLSConfig,
+		CongestionControl: opts.CongestionControl,
+		Handler:           egressHandler{dialer: egress, logger: opts.Logger},
+	})
+	if err != nil {
+		return nil, E.Cause(err, "create tuic service")
+	}
+	service.UpdateUsers([]int{0}, [][16]byte{opts.UUID}, []string{opts.Password})
+	return &Node{realm: realmServer, service: service, logger: opts.Logger}, nil
+}
+
+// Start brings the node online: opens the UDP socket, registers on the
+// rendezvous via realm.Server, and runs the TUIC service on the punched hole.
+func (n *Node) Start(ctx context.Context, conn net.PacketConn) error {
+	punchConn, err := n.realm.Start(ctx, conn)
+	if err != nil {
+		return E.Cause(err, "start realm server")
+	}
+	if err := n.service.Start(punchConn); err != nil {
+		_ = n.realm.Close()
+		return E.Cause(err, "start tuic service")
+	}
+	return nil
+}
+
+// Close stops the node.
+func (n *Node) Close() error {
+	return E.Errors(n.service.Close(), n.realm.Close())
+}
+
+// egressHandler implements singtuic.ServiceHandler: it dials each proxied
+// destination on the open internet and pipes bytes, making this node an egress.
+type egressHandler struct {
+	dialer N.Dialer
+	logger logger.Logger
+}
+
+func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	go func() {
+		var closeErr error
+		defer func() {
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(closeErr)
+			}
+		}()
+		outbound, err := h.dialer.DialContext(ctx, N.NetworkTCP, destination)
+		if err != nil {
+			closeErr = E.Cause(err, "egress dial ", destination)
+			h.logger.Warn(closeErr)
+			return
+		}
+		defer outbound.Close()
+		h.logger.Info("egress TCP -> ", destination)
+		closeErr = bufio.CopyConn(ctx, conn, outbound)
+	}()
+}
+
+func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+	go func() {
+		var closeErr error
+		defer func() {
+			_ = conn.Close()
+			if onClose != nil {
+				onClose(closeErr)
+			}
+		}()
+		outbound, err := h.dialer.ListenPacket(ctx, destination)
+		if err != nil {
+			closeErr = E.Cause(err, "egress listen packet")
+			h.logger.Warn(closeErr)
+			return
+		}
+		defer outbound.Close()
+		h.logger.Info("egress UDP -> ", destination)
+		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
+	}()
+}
+
+// systemDialer is the default egress: plain OS sockets out this node's IP.
+type systemDialer struct{}
+
+func (systemDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, network, destination.String())
+}
+
+func (systemDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	var lc net.ListenConfig
+	return lc.ListenPacket(ctx, N.NetworkUDP, ":0")
+}
+
+var _ N.Dialer = systemDialer{}
+var _ = time.Second // reserved for future timeouts

@@ -1,0 +1,23 @@
+{
+  "_doc": "Problem 1A failover: ONE egress (this host's IP) registers to TWO rendezvous VPSes at once. If rendezvous A's VPS dies, clients pointed at rendezvous B still punch to the same egress. Each rendezvous entry needs its OWN listen port. The protocol + credentials below are shared across all rendezvous.",
+  "protocol": "hysteria2",
+  "password": "m1-hy2-pw",
+  "sni": "iptv.local",
+  "alpn": ["h3"],
+  "rendezvous": [
+    {
+      "server_url": "http://54.255.172.86:9443",
+      "token": "REPLACE_WITH_REALM_TOKEN_A",
+      "realm_id": "m1-hy2-out",
+      "stun_servers": ["74.125.250.129:19302", "162.159.207.0:3478"],
+      "listen": ":51820"
+    },
+    {
+      "server_url": "http://SECOND_RENDEZVOUS_HOST:9443",
+      "token": "REPLACE_WITH_REALM_TOKEN_B",
+      "realm_id": "m1-hy2-out",
+      "stun_servers": ["74.125.250.129:19302", "162.159.207.0:3478"],
+      "listen": ":51830"
+    }
+  ]
+}
