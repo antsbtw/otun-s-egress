@@ -85,6 +85,17 @@ func main() {
 			hold = d
 		}
 	}
+	// A.1 real-machine check: if EVICT_AT is set, at that many seconds into the
+	// hold we remove user A (whole-set update to [B]). An external client of A
+	// that was egressing should have its connection dropped — visible as A's
+	// live-stat line disappearing after the eviction.
+	var evictAt <-chan time.Time
+	if v := os.Getenv("EVICT_AT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			evictAt = time.After(d)
+		}
+	}
+
 	fmt.Printf("holding %s for optional client traffic; live stats:\n", hold)
 	deadline := time.After(hold)
 	tick := time.NewTicker(1 * time.Second)
@@ -98,6 +109,10 @@ func main() {
 			_ = node.Close()
 			fmt.Println("ALL RED LINES OK")
 			return
+		case <-evictAt:
+			fmt.Println("A.1: evicting user A (UpdateUsers -> [B]); A's live conns must drop")
+			must(node.UpdateUsers([]egress.User{{UUID: "B", Password: "pw-b"}}))
+			fmt.Println("A.1: A removed; watch A's live-stat line disappear below")
 		case <-tick.C:
 			for _, s := range node.CollectStats(false) {
 				if s.Upload > 0 || s.Download > 0 {
