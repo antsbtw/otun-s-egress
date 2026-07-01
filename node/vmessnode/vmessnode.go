@@ -24,6 +24,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 
 	squic "github.com/sagernet/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing-vmess"
@@ -34,6 +35,8 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/antsbtw/otun-s-egress/node/userattr"
+	"github.com/antsbtw/otun-s-egress/node/usermap"
 	"github.com/antsbtw/otun-s-egress/underlay"
 )
 
@@ -74,6 +77,9 @@ type Node struct {
 	wrapTLS  aTLS.ServerConfig
 	listener *underlay.StreamListener
 	cancel   context.CancelFunc
+
+	usersMu sync.Mutex
+	users   *usermap.Map
 }
 
 // New builds (does not start) a VMess egress node.
@@ -106,10 +112,39 @@ func New(opts Options) (*Node, error) {
 	// Handler with the negotiated destination — same wiring as sing-box's
 	// vmess inbound (NewService + UpdateUsers + per-conn NewConnection).
 	service := vmess.NewService[int](egressHandler{handler: opts.Handler, logger: opts.Logger})
-	if err := service.UpdateUsers([]int{0}, []string{opts.UUID}, []int{opts.AlterId}); err != nil {
-		return nil, E.Cause(err, "update vmess users")
+	node := &Node{realm: realmServer, service: service, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New()}
+	if err := node.UpdateUsers([]userattr.User{{UUID: opts.UUID, AlterId: opts.AlterId}}); err != nil {
+		return nil, E.Cause(err, "seed users")
 	}
-	return &Node{realm: realmServer, service: service, logger: opts.Logger, wrapTLS: opts.WrapTLS}, nil
+	return node, nil
+}
+
+// UpdateUsers replaces the whole online user set (whole-set semantics). For VMess
+// the UUID string is the wire identity + billing key; AlterId is usually 0.
+// Indices are stable per UUID (node/usermap); the vmess Service swaps its auth
+// map atomically so existing sessions are not dropped.
+func (n *Node) UpdateUsers(users []userattr.User) error {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	alterByUUID := make(map[string]int, len(users))
+	uuids := make([]string, len(users))
+	for i, u := range users {
+		uuids[i] = u.UUID
+		alterByUUID[u.UUID] = u.AlterId
+	}
+	diff := n.users.Reconcile(uuids)
+	alterIds := make([]int, len(diff.UUIDs))
+	for i, id := range diff.UUIDs {
+		alterIds[i] = alterByUUID[id]
+	}
+	return n.service.UpdateUsers(diff.Indices, diff.UUIDs, alterIds)
+}
+
+// UUIDForIndex reverse-resolves an authenticated index to its UUID (R2 metering).
+func (n *Node) UUIDForIndex(index int) (string, bool) {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	return n.users.UUIDForIndex(index)
 }
 
 // Start brings the node online: registers on the rendezvous, runs the QUIC

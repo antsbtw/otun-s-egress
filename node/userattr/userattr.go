@@ -19,6 +19,24 @@ import (
 	"github.com/sagernet/sing/common/auth"
 )
 
+// User is a billable user's egress-side credential + stable identity, shared by
+// all six node packages' UpdateUsers. UUID is the billing primary key (the
+// realm-agent uses it to meter and kick); the other fields are the per-protocol
+// credential (only the ones a given protocol needs are read):
+//   - hy2 / trojan / ss : Password
+//   - tuic              : UUID (as the TUIC uuid) + Password
+//   - vmess / reality   : UUID
+//   - ss                : Method + Password
+//   - vmess             : AlterId (usually 0)
+//   - reality (vless)   : Flow (usually "")
+type User struct {
+	UUID     string
+	Password string
+	Method   string // shadowsocks
+	AlterId  int    // vmess
+	Flow     string // reality/vless
+}
+
 // IndexFromContext returns the authenticated user INDEX the protocol service
 // stored for this connection, and whether one was present. The index is the
 // []int position passed to the service's UpdateUsers; the node maps it back to a

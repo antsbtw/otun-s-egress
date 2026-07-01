@@ -23,9 +23,11 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/antsbtw/otun-s-egress/node/userattr"
+	"github.com/antsbtw/otun-s-egress/node/usermap"
 
 	singhy2 "github.com/sagernet/sing-quic/hysteria2"
 	"github.com/sagernet/sing-quic/hysteria2/realm"
@@ -61,6 +63,9 @@ type Options struct {
 type Node struct {
 	service *singhy2.Service[int]
 	logger  logger.Logger
+
+	usersMu sync.Mutex
+	users   *usermap.Map
 }
 
 // New builds (but does not start) a Hysteria2 egress node.
@@ -97,8 +102,46 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create hysteria2 service")
 	}
-	service.UpdateUsers([]int{0}, []string{opts.Password})
-	return &Node{service: service, logger: opts.Logger}, nil
+	n := &Node{service: service, logger: opts.Logger, users: usermap.New()}
+	// Seed the initial single user from the static config (back-compat): hy2 is
+	// password-only, so the seed UUID is the synthetic "default"; realm-agent
+	// later replaces the whole set via UpdateUsers.
+	if err := n.UpdateUsers([]userattr.User{{UUID: "default", Password: opts.Password}}); err != nil {
+		return nil, E.Cause(err, "seed users")
+	}
+	return n, nil
+}
+
+// UpdateUsers replaces the whole online user set (whole-set semantics: pass the
+// COMPLETE list). Adding/removing users does NOT drop existing connections — the
+// underlying hysteria2 Service atomically swaps its auth map. Indices are stable
+// per UUID across calls (see node/usermap). Removed users' live connections are
+// not force-closed here (that is R3/KickUser); they simply can no longer
+// authenticate new connections.
+func (n *Node) UpdateUsers(users []userattr.User) error {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	uuids := make([]string, len(users))
+	pwByUUID := make(map[string]string, len(users))
+	for i, u := range users {
+		uuids[i] = u.UUID
+		pwByUUID[u.UUID] = u.Password
+	}
+	diff := n.users.Reconcile(uuids)
+	passwords := make([]string, len(diff.UUIDs))
+	for i, uuid := range diff.UUIDs {
+		passwords[i] = pwByUUID[uuid]
+	}
+	n.service.UpdateUsers(diff.Indices, passwords)
+	return nil
+}
+
+// UUIDForIndex reverse-resolves an authenticated user index to its UUID, for
+// per-user metering/billing attribution (R2). ok is false for unknown indices.
+func (n *Node) UUIDForIndex(index int) (string, bool) {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	return n.users.UUIDForIndex(index)
 }
 
 // Start brings the node online: the hysteria2 Service registers on the

@@ -20,10 +20,13 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/antsbtw/otun-s-egress/node/userattr"
+	"github.com/antsbtw/otun-s-egress/node/usermap"
 
+	"github.com/gofrs/uuid/v5"
 	squic "github.com/sagernet/sing-quic/hysteria2/realm"
 	singtuic "github.com/sagernet/sing-quic/tuic"
 	"github.com/sagernet/sing/common/bufio"
@@ -61,6 +64,9 @@ type Node struct {
 	realm   *squic.Server
 	service *singtuic.Service[int]
 	logger  logger.Logger
+
+	usersMu sync.Mutex
+	users   *usermap.Map
 }
 
 // New builds (but does not start) a TUIC egress node.
@@ -97,8 +103,49 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create tuic service")
 	}
-	service.UpdateUsers([]int{0}, [][16]byte{opts.UUID}, []string{opts.Password})
-	return &Node{realm: realmServer, service: service, logger: opts.Logger}, nil
+	n := &Node{realm: realmServer, service: service, logger: opts.Logger, users: usermap.New()}
+	// Seed the initial single user from static config (back-compat). The TUIC
+	// uuid is the billing key; realm-agent later replaces the whole set.
+	seedUUID := uuid.FromBytesOrNil(opts.UUID[:]).String()
+	if err := n.UpdateUsers([]userattr.User{{UUID: seedUUID, Password: opts.Password}}); err != nil {
+		return nil, E.Cause(err, "seed users")
+	}
+	return n, nil
+}
+
+// UpdateUsers replaces the whole online user set (whole-set semantics). Adding/
+// removing users does not drop existing connections — the TUIC Service swaps its
+// auth map atomically. Indices are stable per UUID (node/usermap). For TUIC the
+// UUID string is both the billing key and the wire uuid (parsed to [16]byte).
+func (n *Node) UpdateUsers(users []userattr.User) error {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	pwByUUID := make(map[string]string, len(users))
+	uuids := make([]string, len(users))
+	for i, u := range users {
+		uuids[i] = u.UUID
+		pwByUUID[u.UUID] = u.Password
+	}
+	diff := n.users.Reconcile(uuids)
+	uuidBytes := make([][16]byte, len(diff.UUIDs))
+	passwords := make([]string, len(diff.UUIDs))
+	for i, id := range diff.UUIDs {
+		parsed, err := uuid.FromString(id)
+		if err != nil {
+			return E.Cause(err, "tuic uuid ", id)
+		}
+		uuidBytes[i] = parsed
+		passwords[i] = pwByUUID[id]
+	}
+	n.service.UpdateUsers(diff.Indices, uuidBytes, passwords)
+	return nil
+}
+
+// UUIDForIndex reverse-resolves an authenticated index to its UUID (R2 metering).
+func (n *Node) UUIDForIndex(index int) (string, bool) {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	return n.users.UUIDForIndex(index)
 }
 
 // Start brings the node online: opens the UDP socket, registers on the

@@ -22,15 +22,18 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"sync"
 
-	squic "github.com/sagernet/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing-box/transport/trojan"
+	squic "github.com/sagernet/sing-quic/hysteria2/realm"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/antsbtw/otun-s-egress/node/userattr"
+	"github.com/antsbtw/otun-s-egress/node/usermap"
 	"github.com/antsbtw/otun-s-egress/underlay"
 )
 
@@ -68,6 +71,9 @@ type Node struct {
 	service  *trojan.Service[int]
 	listener *underlay.StreamListener
 	cancel   context.CancelFunc
+
+	usersMu sync.Mutex
+	users   *usermap.Map
 }
 
 // New builds (does not start) a Trojan egress node.
@@ -101,11 +107,41 @@ func New(opts Options) (*Node, error) {
 	// service reads the request header and routes via the handler below; no
 	// fallback (a bad key just fails the stream).
 	service := trojan.NewService[int]((*serviceHandler)(node), nil, contextLogger(opts.Logger))
-	if err := service.UpdateUsers([]int{0}, []string{opts.Password}); err != nil {
-		return nil, E.Cause(err, "trojan service users")
-	}
 	node.service = service
+	node.users = usermap.New()
+	// Seed the initial single user from static config (back-compat): trojan is
+	// password-only, seed UUID is the synthetic "default".
+	if err := node.UpdateUsers([]userattr.User{{UUID: "default", Password: opts.Password}}); err != nil {
+		return nil, E.Cause(err, "seed users")
+	}
 	return node, nil
+}
+
+// UpdateUsers replaces the whole online user set (whole-set semantics). Trojan
+// authenticates by a password hash; indices are stable per UUID (node/usermap)
+// and the Service swaps its auth map atomically (existing streams not dropped).
+func (n *Node) UpdateUsers(users []userattr.User) error {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	pwByUUID := make(map[string]string, len(users))
+	uuids := make([]string, len(users))
+	for i, u := range users {
+		uuids[i] = u.UUID
+		pwByUUID[u.UUID] = u.Password
+	}
+	diff := n.users.Reconcile(uuids)
+	passwords := make([]string, len(diff.UUIDs))
+	for i, id := range diff.UUIDs {
+		passwords[i] = pwByUUID[id]
+	}
+	return n.service.UpdateUsers(diff.Indices, passwords)
+}
+
+// UUIDForIndex reverse-resolves an authenticated index to its UUID (R2 metering).
+func (n *Node) UUIDForIndex(index int) (string, bool) {
+	n.usersMu.Lock()
+	defer n.usersMu.Unlock()
+	return n.users.UUIDForIndex(index)
 }
 
 // Start brings the node online: registers on the rendezvous, then runs the QUIC
