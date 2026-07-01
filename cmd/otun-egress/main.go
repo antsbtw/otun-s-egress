@@ -62,6 +62,7 @@ import (
 	"github.com/antsbtw/otun-s-egress/node/ssnode"
 	"github.com/antsbtw/otun-s-egress/node/trojannode"
 	"github.com/antsbtw/otun-s-egress/node/tuicnode"
+	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/vmessnode"
 
 	sbtls "github.com/sagernet/sing-box/common/tls"
@@ -293,7 +294,7 @@ func (h egressHandler) egress(ctx context.Context, conn net.Conn, destination M.
 		return
 	}
 	defer out.Close()
-	h.lg.Info("egress -> ", destination)
+	h.lg.Info("egress user=", userattr.Label(ctx), " -> ", destination)
 	// Downstream (target->client) MUST fully flush before closing conn, else a
 	// fast client half-close races the response (cmd/otun-node egress race fix).
 	up := make(chan struct{})

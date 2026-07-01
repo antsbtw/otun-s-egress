@@ -25,6 +25,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/antsbtw/otun-s-egress/node/userattr"
+
 	singhy2 "github.com/sagernet/sing-quic/hysteria2"
 	"github.com/sagernet/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing/common/bufio"
@@ -136,7 +138,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 			return
 		}
 		defer outbound.Close()
-		h.logger.Info("egress TCP -> ", destination)
+		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
 }
@@ -157,7 +159,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 			return
 		}
 		defer outbound.Close()
-		h.logger.Info("egress UDP -> ", destination)
+		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()
 }
