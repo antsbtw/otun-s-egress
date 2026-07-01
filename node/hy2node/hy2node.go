@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 
@@ -63,10 +64,18 @@ type Options struct {
 type Node struct {
 	service *singhy2.Service[int]
 	logger  logger.Logger
+	meter   *meter.Registry
 
 	usersMu sync.Mutex
 	users   *usermap.Map
 }
+
+// CollectStats returns per-user traffic; reset=true zeroes after reading (billing
+// path — see node/meter). reset=false is a non-destructive snapshot.
+func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.CollectStats(reset) }
+
+// KickUser force-closes all live connections of a user, returning the count.
+func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
 // New builds (but does not start) a Hysteria2 egress node.
 func New(opts Options) (*Node, error) {
@@ -84,11 +93,12 @@ func New(opts Options) (*Node, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	n := &Node{logger: opts.Logger, users: usermap.New(), meter: meter.New()}
 	service, err := singhy2.NewService[int](singhy2.ServiceOptions{
 		Context:   context.Background(),
 		Logger:    opts.Logger,
 		TLSConfig: opts.TLSConfig,
-		Handler:   egressHandler{dialer: egress, logger: opts.Logger},
+		Handler:   egressHandler{dialer: egress, logger: opts.Logger, node: n},
 		RealmOptions: &realm.Options{
 			ServerURL:   opts.ServerURL,
 			Token:       opts.Token,
@@ -102,7 +112,7 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create hysteria2 service")
 	}
-	n := &Node{service: service, logger: opts.Logger, users: usermap.New()}
+	n.service = service
 	// Seed the initial single user from the static config (back-compat): hy2 is
 	// password-only, so the seed UUID is the synthetic "default"; realm-agent
 	// later replaces the whole set via UpdateUsers.
@@ -144,6 +154,16 @@ func (n *Node) UUIDForIndex(index int) (string, bool) {
 	return n.users.UUIDForIndex(index)
 }
 
+// uuidFor resolves the authenticated user's UUID for a handler context, for
+// metering/kick attribution.
+func (n *Node) uuidFor(ctx context.Context) (string, bool) {
+	idx, ok := userattr.IndexFromContext(ctx)
+	if !ok {
+		return "", false
+	}
+	return n.UUIDForIndex(idx)
+}
+
 // Start brings the node online: the hysteria2 Service registers on the
 // rendezvous (RealmOptions) and runs on the punched hole opened from conn.
 func (n *Node) Start(ctx context.Context, conn net.PacketConn) error {
@@ -163,6 +183,7 @@ func (n *Node) Close() error {
 type egressHandler struct {
 	dialer N.Dialer
 	logger logger.Logger
+	node   *Node
 }
 
 func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -182,6 +203,9 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		}
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
+		if uuid, ok := h.node.uuidFor(ctx); ok {
+			conn = h.node.meter.Track(uuid, conn) // R2: count up/down on the client-side conn
+		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
 }

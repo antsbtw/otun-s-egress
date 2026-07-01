@@ -35,6 +35,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 	"github.com/antsbtw/otun-s-egress/underlay"
@@ -78,9 +79,17 @@ type Node struct {
 	listener *underlay.StreamListener
 	cancel   context.CancelFunc
 
+	meter   *meter.Registry
 	usersMu sync.Mutex
 	users   *usermap.Map
 }
+
+// CollectStats returns per-user traffic; reset=true zeroes after reading (billing
+// path). reset=false is a non-destructive snapshot.
+func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.CollectStats(reset) }
+
+// KickUser force-closes all live connections of a user, returning the count.
+func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
 // New builds (does not start) a VMess egress node.
 func New(opts Options) (*Node, error) {
@@ -111,8 +120,8 @@ func New(opts Options) (*Node, error) {
 	// The vmess.Service decodes each raw conn into a session and calls the
 	// Handler with the negotiated destination — same wiring as sing-box's
 	// vmess inbound (NewService + UpdateUsers + per-conn NewConnection).
-	service := vmess.NewService[int](egressHandler{handler: opts.Handler, logger: opts.Logger})
-	node := &Node{realm: realmServer, service: service, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New()}
+	node := &Node{realm: realmServer, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New(), meter: meter.New()}
+	node.service = vmess.NewService[int](egressHandler{handler: opts.Handler, logger: opts.Logger, node: node})
 	if err := node.UpdateUsers([]userattr.User{{UUID: opts.UUID, AlterId: opts.AlterId}}); err != nil {
 		return nil, E.Cause(err, "seed users")
 	}
@@ -217,11 +226,17 @@ func (n *Node) Close() error {
 type egressHandler struct {
 	handler Handler
 	logger  logger.Logger
+	node    *Node
 }
 
 func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	go func() {
-		h.logger.Info("vmess TCP -> ", destination)
+		h.logger.Info("vmess TCP user=", userattr.Label(ctx), " -> ", destination)
+		if idx, ok := userattr.IndexFromContext(ctx); ok {
+			if uuid, ok := h.node.UUIDForIndex(idx); ok {
+				conn = h.node.meter.Track(uuid, conn) // R2/R3
+			}
+		}
 		h.handler(ctx, conn, destination)
 		if onClose != nil {
 			onClose(nil)

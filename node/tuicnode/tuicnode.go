@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 
@@ -64,9 +65,26 @@ type Node struct {
 	realm   *squic.Server
 	service *singtuic.Service[int]
 	logger  logger.Logger
+	meter   *meter.Registry
 
 	usersMu sync.Mutex
 	users   *usermap.Map
+}
+
+// CollectStats returns per-user traffic; reset=true zeroes after reading (billing
+// path). reset=false is a non-destructive snapshot.
+func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.CollectStats(reset) }
+
+// KickUser force-closes all live connections of a user, returning the count.
+func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
+
+// uuidFor resolves the authenticated user's UUID for a handler context.
+func (n *Node) uuidFor(ctx context.Context) (string, bool) {
+	idx, ok := userattr.IndexFromContext(ctx)
+	if !ok {
+		return "", false
+	}
+	return n.UUIDForIndex(idx)
 }
 
 // New builds (but does not start) a TUIC egress node.
@@ -93,17 +111,18 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
+	n := &Node{realm: realmServer, logger: opts.Logger, users: usermap.New(), meter: meter.New()}
 	service, err := singtuic.NewService[int](singtuic.ServiceOptions{
 		Context:           context.Background(),
 		Logger:            opts.Logger,
 		TLSConfig:         opts.TLSConfig,
 		CongestionControl: opts.CongestionControl,
-		Handler:           egressHandler{dialer: egress, logger: opts.Logger},
+		Handler:           egressHandler{dialer: egress, logger: opts.Logger, node: n},
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create tuic service")
 	}
-	n := &Node{realm: realmServer, service: service, logger: opts.Logger, users: usermap.New()}
+	n.service = service
 	// Seed the initial single user from static config (back-compat). The TUIC
 	// uuid is the billing key; realm-agent later replaces the whole set.
 	seedUUID := uuid.FromBytesOrNil(opts.UUID[:]).String()
@@ -172,6 +191,7 @@ func (n *Node) Close() error {
 type egressHandler struct {
 	dialer N.Dialer
 	logger logger.Logger
+	node   *Node
 }
 
 func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -191,6 +211,9 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		}
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
+		if uuid, ok := h.node.uuidFor(ctx); ok {
+			conn = h.node.meter.Track(uuid, conn) // R2/R3
+		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
 }

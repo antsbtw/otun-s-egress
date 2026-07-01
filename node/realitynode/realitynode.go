@@ -34,6 +34,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 	"github.com/antsbtw/otun-s-egress/underlay"
@@ -79,9 +80,17 @@ type Node struct {
 	vless    *vless.Service[int]
 	cancel   context.CancelFunc
 
+	meter   *meter.Registry
 	usersMu sync.Mutex
 	users   *usermap.Map
 }
+
+// CollectStats returns per-user traffic; reset=true zeroes after reading (billing
+// path). reset=false is a non-destructive snapshot.
+func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.CollectStats(reset) }
+
+// KickUser force-closes all live connections of a user, returning the count.
+func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
 // New builds (does not start) a Reality egress node.
 func New(opts Options) (*Node, error) {
@@ -109,7 +118,7 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger}
+	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: meter.New()}
 	// VLESS service decodes the request header (carried inside the Reality TLS
 	// stream) and calls vlessHandler with the negotiated destination.
 	node.vless = vless.NewService[int](opts.Logger, vlessHandler{node: node})
@@ -214,7 +223,12 @@ type vlessHandler struct {
 
 func (h vlessHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	go func() {
-		h.node.logger.Info("reality(vless) -> ", destination)
+		h.node.logger.Info("reality(vless) user=", userattr.Label(ctx), " -> ", destination)
+		if idx, ok := userattr.IndexFromContext(ctx); ok {
+			if uuid, ok := h.node.UUIDForIndex(idx); ok {
+				conn = h.node.meter.Track(uuid, conn) // R2/R3
+			}
+		}
 		h.node.opts.Handler(ctx, conn, destination)
 		if onClose != nil {
 			onClose(nil)

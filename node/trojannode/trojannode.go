@@ -32,6 +32,7 @@ import (
 	N "github.com/sagernet/sing/common/network"
 	aTLS "github.com/sagernet/sing/common/tls"
 
+	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 	"github.com/antsbtw/otun-s-egress/underlay"
@@ -72,9 +73,17 @@ type Node struct {
 	listener *underlay.StreamListener
 	cancel   context.CancelFunc
 
+	meter   *meter.Registry
 	usersMu sync.Mutex
 	users   *usermap.Map
 }
+
+// CollectStats returns per-user traffic; reset=true zeroes after reading (billing
+// path). reset=false is a non-destructive snapshot.
+func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.CollectStats(reset) }
+
+// KickUser force-closes all live connections of a user, returning the count.
+func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
 // New builds (does not start) a Trojan egress node.
 func New(opts Options) (*Node, error) {
@@ -102,7 +111,7 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger}
+	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: meter.New()}
 	// One-user Trojan service: index 0 keyed by the configured password. The
 	// service reads the request header and routes via the handler below; no
 	// fallback (a bad key just fails the stream).
@@ -202,8 +211,14 @@ type serviceHandler Node
 var _ trojan.Handler = (*serviceHandler)(nil)
 
 func (h *serviceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, _ M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	h.logger.Info("trojan stream to ", destination)
-	(*Node)(h).opts.Handler(ctx, conn, destination)
+	n := (*Node)(h)
+	n.logger.Info("trojan stream user=", userattr.Label(ctx), " to ", destination)
+	if idx, ok := userattr.IndexFromContext(ctx); ok {
+		if uuid, ok := n.UUIDForIndex(idx); ok {
+			conn = n.meter.Track(uuid, conn) // R2/R3: count + make kickable
+		}
+	}
+	n.opts.Handler(ctx, conn, destination)
 	if onClose != nil {
 		onClose(nil)
 	}
