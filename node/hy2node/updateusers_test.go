@@ -42,7 +42,7 @@ func TestUpdateUsersEvictsRemoved(t *testing.T) {
 
 	// A has a live connection (as if a client of A is egressing).
 	ac, _ := net.Pipe()
-	tracked := n.meter.Track("A", ac)
+	tracked := n.meter.Track("A", ac, meter.ConnMeta{})
 
 	// Remove A (whole-set update to just [B]).
 	must(t, n.UpdateUsers([]userattr.User{{UUID: "B", Password: "pw-b"}}))

@@ -18,11 +18,31 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 )
+
+// ConnMeta is the per-connection metadata a node supplies when tracking a conn,
+// for the observability snapshot (B.2). Destination is proxy metadata (host:port),
+// never content; Source is the client address when the handler knows it.
+type ConnMeta struct {
+	Destination string
+	Source      string
+}
+
+// ConnInfo is a read-only snapshot of one live connection, for realm-agent's obs
+// risk-control (conn_lifecycle / egress_behavior). No payload, only metadata.
+type ConnInfo struct {
+	UUID        string
+	Source      string
+	Destination string
+	Upload      int64
+	Download    int64
+	Start       time.Time
+}
 
 // UserStat is a user's accumulated traffic since the last reset.
 type UserStat struct {
@@ -32,8 +52,12 @@ type UserStat struct {
 }
 
 // liveConn is a tracked connection (stream or packet) that can be force-closed
-// on kick. Both trackedConn and trackedPacketConn satisfy it.
-type liveConn interface{ Close() error }
+// on kick and can report a read-only snapshot. Both trackedConn and
+// trackedPacketConn satisfy it.
+type liveConn interface {
+	Close() error
+	info(uuid string) ConnInfo
+}
 
 type userState struct {
 	up   atomic.Int64
@@ -79,11 +103,12 @@ func (r *Registry) state(uuid string) *userState {
 }
 
 // Track wraps a STREAM conn so its byte counts accrue to uuid and it is
-// force-closable via KickUser(uuid). Call once per accepted egress stream; use
-// the returned conn for the bidirectional copy. It unregisters on Close.
-func (r *Registry) Track(uuid string, conn net.Conn) net.Conn {
+// force-closable via KickUser(uuid). meta carries destination/source for the obs
+// snapshot (B.2). Call once per accepted egress stream; use the returned conn for
+// the bidirectional copy. It unregisters on Close.
+func (r *Registry) Track(uuid string, conn net.Conn, meta ConnMeta) net.Conn {
 	s := r.state(uuid)
-	tc := &trackedConn{Conn: conn, state: s}
+	tc := &trackedConn{Conn: conn, state: s, meta: meta, start: time.Now()}
 	s.add(tc)
 	return tc
 }
@@ -92,9 +117,9 @@ func (r *Registry) Track(uuid string, conn net.Conn) net.Conn {
 // upload from client, WritePacket = download to client) and it is force-closable
 // via KickUser(uuid). Symmetric to Track for the UDP path (hy2/tuic). Unregisters
 // on Close.
-func (r *Registry) TrackPacket(uuid string, conn N.PacketConn) N.PacketConn {
+func (r *Registry) TrackPacket(uuid string, conn N.PacketConn, meta ConnMeta) N.PacketConn {
 	s := r.state(uuid)
-	tp := &trackedPacketConn{PacketConn: conn, state: s}
+	tp := &trackedPacketConn{PacketConn: conn, state: s, meta: meta, start: time.Now()}
 	s.add(tp)
 	return tp
 }
@@ -142,6 +167,27 @@ func (r *Registry) KickUser(uuid string) int {
 	return len(conns)
 }
 
+// Snapshot returns a read-only view of every live connection across all users,
+// for realm-agent's obs risk-control (B.2: conn_lifecycle / egress_behavior). No
+// payload, only metadata + per-conn byte counters. Cheap, read-only.
+func (r *Registry) Snapshot() []ConnInfo {
+	r.mu.Lock()
+	states := make(map[string]*userState, len(r.users))
+	for uuid, s := range r.users {
+		states[uuid] = s
+	}
+	r.mu.Unlock()
+	var out []ConnInfo
+	for uuid, s := range states {
+		s.mu.Lock()
+		for c := range s.conns {
+			out = append(out, c.info(uuid))
+		}
+		s.mu.Unlock()
+	}
+	return out
+}
+
 // EvictUser kicks a user's live connections AND drops its state from the
 // registry (so CollectStats no longer returns a ghost row). Used on user removal
 // (R1 delete linkage): the removed user must both lose its live tunnels (R3) and
@@ -156,22 +202,26 @@ func (r *Registry) EvictUser(uuid string) int {
 	return kicked
 }
 
-// trackedConn is a net.Conn whose Read/Write increment its user's counters and
-// which unregisters itself from the user's live-connection set on Close.
+// trackedConn is a net.Conn whose Read/Write increment its user's counters (and
+// its own per-conn counters, for the obs snapshot) and which unregisters itself
+// from the user's live-connection set on Close.
 type trackedConn struct {
 	net.Conn
 	state     *userState
+	meta      ConnMeta
+	start     time.Time
+	up        atomic.Int64
+	down      atomic.Int64
 	closeOnce sync.Once
 }
 
-// Read counts DOWNLOAD: bytes flowing target -> client are read from the egress
-// (outbound) side and written back to the client. In the node egress copy, the
-// tracked conn is the CLIENT-side conn, so Write to it == download to client and
-// Read from it == upload from client. See node wiring.
+// Read counts UPLOAD: on the CLIENT-side conn, Read pulls bytes the client sent
+// toward the target. Write counts DOWNLOAD (target -> client). See node wiring.
 func (t *trackedConn) Read(b []byte) (int, error) {
 	n, err := t.Conn.Read(b)
 	if n > 0 {
 		t.state.up.Add(int64(n))
+		t.up.Add(int64(n))
 	}
 	return n, err
 }
@@ -180,6 +230,7 @@ func (t *trackedConn) Write(b []byte) (int, error) {
 	n, err := t.Conn.Write(b)
 	if n > 0 {
 		t.state.down.Add(int64(n))
+		t.down.Add(int64(n))
 	}
 	return n, err
 }
@@ -189,6 +240,13 @@ func (t *trackedConn) Close() error {
 	return t.Conn.Close()
 }
 
+func (t *trackedConn) info(uuid string) ConnInfo {
+	return ConnInfo{
+		UUID: uuid, Source: t.meta.Source, Destination: t.meta.Destination,
+		Upload: t.up.Load(), Download: t.down.Load(), Start: t.start,
+	}
+}
+
 // trackedPacketConn is the UDP counterpart of trackedConn: ReadPacket counts
 // upload (client -> target), WritePacket counts download (target -> client). It
 // wraps the CLIENT-side N.PacketConn in the node's UDP egress copy, so byte
@@ -196,6 +254,10 @@ func (t *trackedConn) Close() error {
 type trackedPacketConn struct {
 	N.PacketConn
 	state     *userState
+	meta      ConnMeta
+	start     time.Time
+	up        atomic.Int64
+	down      atomic.Int64
 	closeOnce sync.Once
 }
 
@@ -204,6 +266,7 @@ func (t *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) 
 	dest, err := t.PacketConn.ReadPacket(buffer)
 	if n := buffer.Len() - before; n > 0 {
 		t.state.up.Add(int64(n))
+		t.up.Add(int64(n))
 	}
 	return dest, err
 }
@@ -213,6 +276,7 @@ func (t *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksa
 	err := t.PacketConn.WritePacket(buffer, destination)
 	if err == nil && n > 0 {
 		t.state.down.Add(int64(n))
+		t.down.Add(int64(n))
 	}
 	return err
 }
@@ -220,4 +284,11 @@ func (t *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksa
 func (t *trackedPacketConn) Close() error {
 	t.closeOnce.Do(func() { t.state.remove(t) })
 	return t.PacketConn.Close()
+}
+
+func (t *trackedPacketConn) info(uuid string) ConnInfo {
+	return ConnInfo{
+		UUID: uuid, Source: t.meta.Source, Destination: t.meta.Destination,
+		Upload: t.up.Load(), Download: t.down.Load(), Start: t.start,
+	}
 }

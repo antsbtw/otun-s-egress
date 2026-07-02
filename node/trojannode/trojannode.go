@@ -85,6 +85,10 @@ func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.Collec
 // KickUser force-closes all live connections of a user, returning the count.
 func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
+// ActiveConnections returns a read-only snapshot of all live connections for
+// realm-agent obs risk-control (B.2).
+func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
+
 // New builds (does not start) a Trojan egress node.
 func New(opts Options) (*Node, error) {
 	if opts.WrapTLS == nil {
@@ -221,7 +225,7 @@ func (h *serviceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, _ M
 	n.logger.Info("trojan stream user=", userattr.Label(ctx), " to ", destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := n.UUIDForIndex(idx); ok {
-			conn = n.meter.Track(uuid, conn) // R2/R3: count + make kickable
+			conn = n.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 		}
 	}
 	n.opts.Handler(ctx, conn, destination)

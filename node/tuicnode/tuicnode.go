@@ -78,6 +78,10 @@ func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.Collec
 // KickUser force-closes all live connections of a user, returning the count.
 func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
+// ActiveConnections returns a read-only snapshot of all live connections for
+// realm-agent obs risk-control (B.2).
+func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
+
 // uuidFor resolves the authenticated user's UUID for a handler context.
 func (n *Node) uuidFor(ctx context.Context) (string, bool) {
 	idx, ok := userattr.IndexFromContext(ctx)
@@ -215,7 +219,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.Track(uuid, conn) // R2/R3
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
@@ -239,7 +243,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		defer outbound.Close()
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.TrackPacket(uuid, conn) // R2: count UDP up/down per user
+			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()

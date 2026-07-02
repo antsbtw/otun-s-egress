@@ -97,6 +97,10 @@ func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.Collec
 // KickUser force-closes all live connections of a user, returning the count.
 func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
+// ActiveConnections returns a read-only snapshot of all live connections for
+// realm-agent obs risk-control (B.2).
+func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
+
 // New builds (does not start) a Shadowsocks egress node.
 func New(opts Options) (*Node, error) {
 	if opts.WrapTLS == nil {
@@ -246,7 +250,7 @@ func (h ssHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.
 	h.node.logger.Info("shadowsocks stream user=", userattr.Label(ctx), " -> ", metadata.Destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := h.node.UUIDForIndex(idx); ok {
-			conn = h.node.meter.Track(uuid, conn) // R2/R3
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: metadata.Destination.String()})
 		}
 	}
 	h.node.opts.Handler(ctx, conn, metadata.Destination)

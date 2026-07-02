@@ -53,6 +53,11 @@ type Options struct {
 	// Hysteria2 server params.
 	TLSConfig aTLS.ServerConfig // caller-built (cert/key); required
 	Password  string            // Hy2 auth (password-only; no UUID)
+	// ObfsPassword enables salamander obfuscation when non-empty. Production realm
+	// hy2 outbounds default to salamander with a per-egress password carried in the
+	// client's connect_url (?obfs=...), so both ends MUST use the same password or
+	// the client cannot handshake. Empty = obfs disabled (back-compat).
+	ObfsPassword string
 
 	// Egress dials proxied destinations from this node. If nil, a plain
 	// net.Dialer is used (exit = this node's default route / public IP).
@@ -77,6 +82,10 @@ func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.Collec
 // KickUser force-closes all live connections of a user, returning the count.
 func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
+// ActiveConnections returns a read-only snapshot of all live connections for
+// realm-agent obs risk-control (B.2).
+func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
+
 // New builds (but does not start) a Hysteria2 egress node.
 func New(opts Options) (*Node, error) {
 	if opts.TLSConfig == nil {
@@ -95,10 +104,11 @@ func New(opts Options) (*Node, error) {
 	}
 	n := &Node{logger: opts.Logger, users: usermap.New(), meter: meter.New()}
 	service, err := singhy2.NewService[int](singhy2.ServiceOptions{
-		Context:   context.Background(),
-		Logger:    opts.Logger,
-		TLSConfig: opts.TLSConfig,
-		Handler:   egressHandler{dialer: egress, logger: opts.Logger, node: n},
+		Context:            context.Background(),
+		Logger:             opts.Logger,
+		TLSConfig:          opts.TLSConfig,
+		SalamanderPassword: opts.ObfsPassword,
+		Handler:            egressHandler{dialer: egress, logger: opts.Logger, node: n},
 		RealmOptions: &realm.Options{
 			ServerURL:   opts.ServerURL,
 			Token:       opts.Token,
@@ -207,7 +217,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.Track(uuid, conn) // R2: count up/down on the client-side conn
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
@@ -231,7 +241,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		defer outbound.Close()
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.TrackPacket(uuid, conn) // R2: count UDP up/down per user
+			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()

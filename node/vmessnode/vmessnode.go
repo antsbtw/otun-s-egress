@@ -91,6 +91,10 @@ func (n *Node) CollectStats(reset bool) []meter.UserStat { return n.meter.Collec
 // KickUser force-closes all live connections of a user, returning the count.
 func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 
+// ActiveConnections returns a read-only snapshot of all live connections for
+// realm-agent obs risk-control (B.2).
+func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
+
 // New builds (does not start) a VMess egress node.
 func New(opts Options) (*Node, error) {
 	if opts.WrapTLS == nil {
@@ -240,7 +244,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		h.logger.Info("vmess TCP user=", userattr.Label(ctx), " -> ", destination)
 		if idx, ok := userattr.IndexFromContext(ctx); ok {
 			if uuid, ok := h.node.UUIDForIndex(idx); ok {
-				conn = h.node.meter.Track(uuid, conn) // R2/R3
+				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
 			}
 		}
 		h.handler(ctx, conn, destination)

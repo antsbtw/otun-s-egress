@@ -202,13 +202,13 @@ func systemResolver(ctx context.Context, host string, ipv4, ipv6 bool) ([]netip.
 // logger (stderr). Enough to see registration + egress activity on the node.
 type stderrLogger struct{}
 
-func (stderrLogger) Trace(args ...any)          { log.Print(append([]any{"[trace] "}, args...)...) }
-func (stderrLogger) Debug(args ...any)          { log.Print(append([]any{"[debug] "}, args...)...) }
-func (stderrLogger) Info(args ...any)           { log.Print(append([]any{"[info] "}, args...)...) }
-func (stderrLogger) Warn(args ...any)           { log.Print(append([]any{"[warn] "}, args...)...) }
-func (stderrLogger) Error(args ...any)          { log.Print(append([]any{"[error] "}, args...)...) }
-func (stderrLogger) Fatal(args ...any)          { log.Fatal(args...) }
-func (stderrLogger) Panic(args ...any)          { log.Panic(args...) }
+func (stderrLogger) Trace(args ...any)                          { log.Print(append([]any{"[trace] "}, args...)...) }
+func (stderrLogger) Debug(args ...any)                          { log.Print(append([]any{"[debug] "}, args...)...) }
+func (stderrLogger) Info(args ...any)                           { log.Print(append([]any{"[info] "}, args...)...) }
+func (stderrLogger) Warn(args ...any)                           { log.Print(append([]any{"[warn] "}, args...)...) }
+func (stderrLogger) Error(args ...any)                          { log.Print(append([]any{"[error] "}, args...)...) }
+func (stderrLogger) Fatal(args ...any)                          { log.Fatal(args...) }
+func (stderrLogger) Panic(args ...any)                          { log.Panic(args...) }
 func (l stderrLogger) TraceContext(_ context.Context, a ...any) { l.Trace(a...) }
 func (l stderrLogger) DebugContext(_ context.Context, a ...any) { l.Debug(a...) }
 func (l stderrLogger) InfoContext(_ context.Context, a ...any)  { l.Info(a...) }

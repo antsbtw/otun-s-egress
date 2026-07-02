@@ -31,6 +31,9 @@ type User = userattr.User
 // UserStat re-exports the per-user traffic counter.
 type UserStat = meter.UserStat
 
+// ConnInfo re-exports the per-connection observability snapshot.
+type ConnInfo = meter.ConnInfo
+
 // Node is a running egress for one protocol on one rendezvous slot. All six
 // protocol node packages satisfy it.
 type Node interface {
@@ -48,4 +51,8 @@ type Node interface {
 	CollectStats(reset bool) []UserStat
 	// KickUser force-closes all live connections of a user, returning the count.
 	KickUser(uuid string) int
+	// ActiveConnections returns a read-only snapshot of all live connections for
+	// realm-agent's obs risk-control (conn_lifecycle / egress_behavior). Metadata
+	// only (destination/source/bytes/start), never payload.
+	ActiveConnections() []ConnInfo
 }

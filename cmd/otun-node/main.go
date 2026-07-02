@@ -210,13 +210,13 @@ func systemResolver(ctx context.Context, host string, _, _ bool) ([]netip.Addr, 
 
 type stderrLogger struct{}
 
-func (stderrLogger) Trace(a ...any)                            { log.Print(append([]any{"[trace] "}, a...)...) }
-func (stderrLogger) Debug(a ...any)                            { log.Print(append([]any{"[debug] "}, a...)...) }
-func (stderrLogger) Info(a ...any)                             { log.Print(append([]any{"[info] "}, a...)...) }
-func (stderrLogger) Warn(a ...any)                             { log.Print(append([]any{"[warn] "}, a...)...) }
-func (stderrLogger) Error(a ...any)                            { log.Print(append([]any{"[error] "}, a...)...) }
-func (stderrLogger) Fatal(a ...any)                            { log.Fatal(a...) }
-func (stderrLogger) Panic(a ...any)                            { log.Panic(a...) }
+func (stderrLogger) Trace(a ...any)                             { log.Print(append([]any{"[trace] "}, a...)...) }
+func (stderrLogger) Debug(a ...any)                             { log.Print(append([]any{"[debug] "}, a...)...) }
+func (stderrLogger) Info(a ...any)                              { log.Print(append([]any{"[info] "}, a...)...) }
+func (stderrLogger) Warn(a ...any)                              { log.Print(append([]any{"[warn] "}, a...)...) }
+func (stderrLogger) Error(a ...any)                             { log.Print(append([]any{"[error] "}, a...)...) }
+func (stderrLogger) Fatal(a ...any)                             { log.Fatal(a...) }
+func (stderrLogger) Panic(a ...any)                             { log.Panic(a...) }
 func (l stderrLogger) TraceContext(_ context.Context, a ...any) { l.Trace(a...) }
 func (l stderrLogger) DebugContext(_ context.Context, a ...any) { l.Debug(a...) }
 func (l stderrLogger) InfoContext(_ context.Context, a ...any)  { l.Info(a...) }

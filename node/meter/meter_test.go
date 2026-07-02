@@ -15,7 +15,7 @@ func TestMeterCountAndReset(t *testing.T) {
 	r := New()
 	c1, c2 := net.Pipe()
 	defer c2.Close()
-	tracked := r.Track("userA", c1)
+	tracked := r.Track("userA", c1, ConnMeta{})
 
 	// Write 5 bytes (download to client) and read 3 bytes (upload from client).
 	go func() { c2.Read(make([]byte, 5)) }()
@@ -52,8 +52,8 @@ func TestKickUser(t *testing.T) {
 	r := New()
 	a1, _ := net.Pipe()
 	b1, _ := net.Pipe()
-	ta := r.Track("A", a1)
-	tb := r.Track("B", b1)
+	ta := r.Track("A", a1, ConnMeta{})
+	tb := r.Track("B", b1, ConnMeta{})
 
 	if n := r.KickUser("A"); n != 1 {
 		t.Fatalf("KickUser(A)=%d, want 1", n)
@@ -87,8 +87,8 @@ func TestEvictUser(t *testing.T) {
 	r := New()
 	a1, _ := net.Pipe()
 	b1, _ := net.Pipe()
-	ta := r.Track("A", a1)
-	_ = r.Track("B", b1)
+	ta := r.Track("A", a1, ConnMeta{})
+	_ = r.Track("B", b1, ConnMeta{})
 
 	// A is present in stats before evict.
 	if statFor(r.CollectStats(false), "A").UUID != "A" {
@@ -118,7 +118,7 @@ func TestEvictUser(t *testing.T) {
 func TestTrackPacketCount(t *testing.T) {
 	r := New()
 	fake := &fakePacketConn{readSize: 7}
-	tp := r.TrackPacket("U", fake)
+	tp := r.TrackPacket("U", fake, ConnMeta{})
 
 	// ReadPacket appends 7 bytes -> upload += 7.
 	rb := buf.NewSize(64)
@@ -160,3 +160,39 @@ func (f *fakePacketConn) LocalAddr() net.Addr                            { retur
 func (f *fakePacketConn) SetDeadline(t time.Time) error                  { return nil }
 func (f *fakePacketConn) SetReadDeadline(t time.Time) error              { return nil }
 func (f *fakePacketConn) SetWriteDeadline(t time.Time) error             { return nil }
+
+// TestSnapshot verifies B.2 ActiveConnections: live conns appear with their
+// UUID/Destination and per-conn bytes; closed conns drop from the snapshot.
+func TestSnapshot(t *testing.T) {
+	r := New()
+	c1, peer1 := net.Pipe()
+	defer peer1.Close()
+	tracked := r.Track("A", c1, ConnMeta{Destination: "example.com:443", Source: "1.2.3.4:5555"})
+
+	// One byte each direction so the snapshot shows nonzero counters.
+	go func() { peer1.Read(make([]byte, 3)) }()
+	tracked.Write([]byte("abc")) // download += 3
+	go func() { peer1.Write([]byte("xy")) }()
+	tracked.Read(make([]byte, 2)) // upload += 2
+
+	snap := r.Snapshot()
+	if len(snap) != 1 {
+		t.Fatalf("Snapshot len=%d, want 1", len(snap))
+	}
+	ci := snap[0]
+	if ci.UUID != "A" || ci.Destination != "example.com:443" || ci.Source != "1.2.3.4:5555" {
+		t.Fatalf("snapshot meta wrong: %+v", ci)
+	}
+	if ci.Download != 3 || ci.Upload != 2 {
+		t.Fatalf("snapshot bytes got up=%d down=%d, want up=2 down=3", ci.Upload, ci.Download)
+	}
+	if ci.Start.IsZero() {
+		t.Fatal("snapshot Start is zero")
+	}
+
+	// Closing the conn drops it from the snapshot.
+	tracked.Close()
+	if n := len(r.Snapshot()); n != 0 {
+		t.Fatalf("Snapshot after close len=%d, want 0", n)
+	}
+}

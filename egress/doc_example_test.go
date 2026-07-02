@@ -12,11 +12,12 @@ import (
 // v2ray_api, no clash_api, no hotreload HTTP, no sing-box fork.
 func Example() {
 	node, err := egress.New(egress.Config{
-		Protocol:    "hysteria2",
-		ServerURL:   "http://rendezvous:9443",
-		Token:       "<realm token>",
-		RealmID:     "cn-hy2",
-		STUNServers: []string{"74.125.250.129:19302"},
+		Protocol:     "hysteria2",
+		ServerURL:    "http://rendezvous:9443",
+		Token:        "<realm token>",
+		RealmID:      "cn-hy2",
+		STUNServers:  []string{"74.125.250.129:19302"},
+		ObfsPassword: "<salamander pw from connect_url ?obfs=>", // B.1: must match client
 	})
 	if err != nil {
 		panic(err)
@@ -40,6 +41,11 @@ func Example() {
 
 	// R3: kick a user whose quota/time expired.
 	_ = node.KickUser("user-a-uuid")
+
+	// B.2: read the live-connection snapshot for obs risk-control.
+	for _, c := range node.ActiveConnections() {
+		_ = c // {c.UUID, c.Destination, c.Upload, c.Download, c.Start}
+	}
 
 	_ = node.Close()
 }

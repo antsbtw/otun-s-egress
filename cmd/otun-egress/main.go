@@ -107,6 +107,7 @@ type config struct {
 
 	// Shared / protocol-specific.
 	Password          string   `json:"password"`           // hy2/tuic/trojan/ss
+	ObfsPassword      string   `json:"obfs_password"`      // hy2 salamander obfs
 	Method            string   `json:"method"`             // ss
 	UUID              string   `json:"uuid"`               // tuic/vmess/reality
 	SNI               string   `json:"sni"`                // hy2/tuic TLS server name
@@ -192,7 +193,8 @@ func buildNode(ctx context.Context, lg logger.ContextLogger, cfg config, rdv ren
 		node, err := hy2node.New(hy2node.Options{
 			ServerURL: rdv.ServerURL, Token: rdv.Token, RealmID: rdv.RealmID,
 			STUNServers: rdv.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			TLSConfig: buildServerTLS(ctx, lg, sni, alpn), Password: cfg.Password, Logger: lg,
+			TLSConfig: buildServerTLS(ctx, lg, sni, alpn), Password: cfg.Password,
+			ObfsPassword: cfg.ObfsPassword, Logger: lg,
 		})
 		fatalIf(err)
 		return node

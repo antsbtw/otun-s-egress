@@ -45,6 +45,7 @@ type Config struct {
 
 	// Credentials (protocol-specific).
 	Password          string   // hy2/tuic/trojan/ss
+	ObfsPassword      string   // hy2 salamander obfs (empty = disabled); must match client's ?obfs=
 	Method            string   // ss
 	UUID              string   // tuic/vmess/reality
 	SNI               string   // hy2/tuic TLS server name (default iptv.local)
@@ -57,6 +58,13 @@ type Config struct {
 	ServerName      string
 	HandshakeServer string
 	HandshakePort   uint16
+
+	// CertPEM/KeyPEM optionally inject a STABLE leaf TLS cert (B.3): when both are
+	// set they are used instead of a fresh per-start self-signed cert, so the
+	// leaf fingerprint survives restarts (matters only if the client pins it; with
+	// insecure client TLS this is not required). Applies to the hy2/tuic outer TLS.
+	CertPEM string
+	KeyPEM  string
 
 	// Logger is optional; a NOP logger is used when nil.
 	Logger logger.ContextLogger
@@ -79,7 +87,8 @@ func New(cfg Config) (Node, error) {
 		return hy2node.New(hy2node.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			TLSConfig: buildServerTLS(ctx, lg, sni, alpn), Password: cfg.Password, Logger: lg,
+			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
+			ObfsPassword: cfg.ObfsPassword, Logger: lg,
 		})
 
 	case "tuic":
@@ -91,7 +100,7 @@ func New(cfg Config) (Node, error) {
 		return tuicnode.New(tuicnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			TLSConfig: buildServerTLS(ctx, lg, sni, alpn), UUID: userUUID,
+			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
 			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Logger: lg,
 		})
 
@@ -177,8 +186,11 @@ func (h egressPipe) egress(ctx context.Context, conn net.Conn, destination M.Soc
 	<-up
 }
 
-func buildServerTLS(ctx context.Context, lg logger.ContextLogger, sni string, alpn []string) sbtls.ServerConfig {
-	certPEM, keyPEM := selfSignedCert(sni)
+func buildServerTLS(ctx context.Context, lg logger.ContextLogger, sni string, alpn []string, injectedCert, injectedKey string) sbtls.ServerConfig {
+	certPEM, keyPEM := injectedCert, injectedKey
+	if certPEM == "" || keyPEM == "" {
+		certPEM, keyPEM = selfSignedCert(sni) // B.3: fall back to a fresh self-signed cert
+	}
 	cfg, err := sbtls.NewSTDServer(ctx, lg, option.InboundTLSOptions{
 		Enabled: true, ServerName: sni, ALPN: alpn,
 		Certificate: []string{certPEM}, Key: []string{keyPEM},
