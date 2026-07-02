@@ -84,6 +84,12 @@ type Options struct {
 	// net.Dialer is used (exit = this node's default route / public IP).
 	Egress N.Dialer
 
+	// Meter is the per-user traffic/connection registry. When non-nil the node
+	// SHARES it (C.1: one Registry across the six protocol nodes of a physical
+	// egress). When nil the node builds its own (back-compat). usermap stays
+	// per-node regardless.
+	Meter *meter.Registry
+
 	// Handler processes each decoded VMess TCP session. Required.
 	Handler Handler
 	Logger  logger.Logger
@@ -147,7 +153,11 @@ func New(opts Options) (*Node, error) {
 	// The vmess.Service decodes each raw conn into a session and calls the
 	// Handler with the negotiated destination — same wiring as sing-box's
 	// vmess inbound (NewService + UpdateUsers + per-conn NewConnection).
-	node := &Node{realm: realmServer, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New(), meter: meter.New()}
+	reg := opts.Meter
+	if reg == nil {
+		reg = meter.New()
+	}
+	node := &Node{realm: realmServer, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New(), meter: reg}
 	node.service = vmess.NewService[int](egressHandler{handler: opts.Handler, dialer: egress, logger: opts.Logger, node: node})
 	if err := node.UpdateUsers([]userattr.User{{UUID: opts.UUID, AlterId: opts.AlterId}}); err != nil {
 		return nil, E.Cause(err, "seed users")
@@ -269,7 +279,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		h.logger.Info("vmess TCP user=", userattr.Label(ctx), " -> ", destination)
 		if idx, ok := userattr.IndexFromContext(ctx); ok {
 			if uuid, ok := h.node.UUIDForIndex(idx); ok {
-				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "vmess"})
 			}
 		}
 		h.handler(ctx, conn, destination)
@@ -298,7 +308,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		if idx, ok := userattr.IndexFromContext(ctx); ok {
 			if uuid, ok := h.node.UUIDForIndex(idx); ok {
-				conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+				conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "vmess"})
 			}
 		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))

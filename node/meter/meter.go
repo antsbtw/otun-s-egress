@@ -27,18 +27,24 @@ import (
 
 // ConnMeta is the per-connection metadata a node supplies when tracking a conn,
 // for the observability snapshot (B.2). Destination is proxy metadata (host:port),
-// never content; Source is the client address when the handler knows it.
+// never content; Source is the client address when the handler knows it. Protocol
+// is the egress protocol name ("hysteria2"/"tuic"/…): when six nodes share one
+// Registry (C.1) it lets Snapshot() distinguish which protocol a conn belongs to.
 type ConnMeta struct {
 	Destination string
 	Source      string
+	Protocol    string
 }
 
 // ConnInfo is a read-only snapshot of one live connection, for realm-agent's obs
 // risk-control (conn_lifecycle / egress_behavior). No payload, only metadata.
+// Protocol tags which egress protocol served the conn (relevant when several
+// protocol nodes share one Registry — C.1).
 type ConnInfo struct {
 	UUID        string
 	Source      string
 	Destination string
+	Protocol    string
 	Upload      int64
 	Download    int64
 	Start       time.Time
@@ -243,7 +249,8 @@ func (t *trackedConn) Close() error {
 func (t *trackedConn) info(uuid string) ConnInfo {
 	return ConnInfo{
 		UUID: uuid, Source: t.meta.Source, Destination: t.meta.Destination,
-		Upload: t.up.Load(), Download: t.down.Load(), Start: t.start,
+		Protocol: t.meta.Protocol,
+		Upload:   t.up.Load(), Download: t.down.Load(), Start: t.start,
 	}
 }
 
@@ -289,6 +296,7 @@ func (t *trackedPacketConn) Close() error {
 func (t *trackedPacketConn) info(uuid string) ConnInfo {
 	return ConnInfo{
 		UUID: uuid, Source: t.meta.Source, Destination: t.meta.Destination,
-		Upload: t.up.Load(), Download: t.down.Load(), Start: t.start,
+		Protocol: t.meta.Protocol,
+		Upload:   t.up.Load(), Download: t.down.Load(), Start: t.start,
 	}
 }

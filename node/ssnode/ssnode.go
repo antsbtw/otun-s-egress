@@ -65,6 +65,12 @@ type Options struct {
 	Method   string
 	Password string
 
+	// Meter is the per-user traffic/connection registry. When non-nil the node
+	// SHARES it (C.1: one Registry across the six protocol nodes of a physical
+	// egress). When nil the node builds its own (back-compat). usermap stays
+	// per-node regardless.
+	Meter *meter.Registry
+
 	// Handler processes each decoded SS stream. Required.
 	Handler ConnHandler
 	Logger  logger.Logger
@@ -127,7 +133,11 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, users: usermap.New(), meter: meter.New()}
+	reg := opts.Meter
+	if reg == nil {
+		reg = meter.New()
+	}
+	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, users: usermap.New(), meter: reg}
 	// Multi-user SS service: decodes the SS AEAD wire (wire-compatible with the
 	// client's sing-shadowsocks2 Method) and, per user, hands us the decoded
 	// (destination, payload-conn) plus the matched user in ctx.
@@ -250,7 +260,7 @@ func (h ssHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.
 	h.node.logger.Info("shadowsocks stream user=", userattr.Label(ctx), " -> ", metadata.Destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := h.node.UUIDForIndex(idx); ok {
-			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: metadata.Destination.String()})
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: metadata.Destination.String(), Protocol: "shadowsocks"})
 		}
 	}
 	h.node.opts.Handler(ctx, conn, metadata.Destination)

@@ -31,8 +31,22 @@ type User = userattr.User
 // UserStat re-exports the per-user traffic counter.
 type UserStat = meter.UserStat
 
-// ConnInfo re-exports the per-connection observability snapshot.
+// ConnInfo re-exports the per-connection observability snapshot. ConnInfo.Protocol
+// tags which protocol served the conn — meaningful when several protocol nodes
+// share one Registry (C.1).
 type ConnInfo = meter.ConnInfo
+
+// Registry re-exports the shared per-user meter + connection registry. Build one
+// with NewRegistry and inject it into several nodes (via Config.Meter or
+// NewShared) so billing/kick/snapshot span all of them in one call (C.1).
+type Registry = meter.Registry
+
+// NewRegistry builds an empty shared Registry. Inject the SAME instance into
+// several protocol Configs (Config.Meter) — or use NewShared — so one physical
+// node's six protocols share one billing/kick/snapshot surface (C.1). Operate on
+// it directly: reg.CollectStats(true) / reg.KickUser(uuid) / reg.Snapshot() each
+// cover every node sharing it, atomically and without merging six results.
+func NewRegistry() *Registry { return meter.New() }
 
 // Node is a running egress for one protocol on one rendezvous slot. All six
 // protocol node packages satisfy it.

@@ -59,6 +59,12 @@ type Options struct {
 	// Password is the Trojan credential; the accepted key must match it.
 	Password string
 
+	// Meter is the per-user traffic/connection registry. When non-nil the node
+	// SHARES it (C.1: one Registry across the six protocol nodes of a physical
+	// egress). When nil the node builds its own (back-compat). usermap stays
+	// per-node regardless.
+	Meter *meter.Registry
+
 	// Handler processes each Trojan stream + destination. Required.
 	Handler ConnHandler
 	Logger  logger.Logger
@@ -115,7 +121,11 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: meter.New()}
+	reg := opts.Meter
+	if reg == nil {
+		reg = meter.New()
+	}
+	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: reg}
 	// One-user Trojan service: index 0 keyed by the configured password. The
 	// service reads the request header and routes via the handler below; no
 	// fallback (a bad key just fails the stream).
@@ -225,7 +235,7 @@ func (h *serviceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, _ M
 	n.logger.Info("trojan stream user=", userattr.Label(ctx), " to ", destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := n.UUIDForIndex(idx); ok {
-			conn = n.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+			conn = n.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "trojan"})
 		}
 	}
 	n.opts.Handler(ctx, conn, destination)

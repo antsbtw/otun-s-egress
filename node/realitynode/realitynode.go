@@ -66,6 +66,12 @@ type Options struct {
 	// match the client's overlay/reality UUID.
 	UUID string
 
+	// Meter is the per-user traffic/connection registry. When non-nil the node
+	// SHARES it (C.1: one Registry across the six protocol nodes of a physical
+	// egress). When nil the node builds its own (back-compat). usermap stays
+	// per-node regardless.
+	Meter *meter.Registry
+
 	// Handler processes each decoded VLESS-over-Reality session. Required.
 	Handler ConnHandler
 	Logger  logger.Logger
@@ -122,7 +128,11 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: meter.New()}
+	reg := opts.Meter
+	if reg == nil {
+		reg = meter.New()
+	}
+	node := &Node{realm: realmServer, opts: opts, logger: opts.Logger, meter: reg}
 	// VLESS service decodes the request header (carried inside the Reality TLS
 	// stream) and calls vlessHandler with the negotiated destination.
 	node.vless = vless.NewService[int](opts.Logger, vlessHandler{node: node})
@@ -233,7 +243,7 @@ func (h vlessHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source
 		h.node.logger.Info("reality(vless) user=", userattr.Label(ctx), " -> ", destination)
 		if idx, ok := userattr.IndexFromContext(ctx); ok {
 			if uuid, ok := h.node.UUIDForIndex(idx); ok {
-				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "reality"})
 			}
 		}
 		h.node.opts.Handler(ctx, conn, destination)

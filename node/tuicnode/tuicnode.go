@@ -57,6 +57,13 @@ type Options struct {
 	// Egress dials proxied destinations from this node. If nil, a plain
 	// net.Dialer is used (exit = this node's default route / public IP).
 	Egress N.Dialer
+
+	// Meter is the per-user traffic/connection registry. When non-nil the node
+	// SHARES it (C.1: one Registry across the six protocol nodes of a physical
+	// egress). When nil the node builds its own (back-compat). usermap stays
+	// per-node regardless.
+	Meter *meter.Registry
+
 	Logger logger.Logger
 }
 
@@ -115,7 +122,11 @@ func New(opts Options) (*Node, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
 	}
-	n := &Node{realm: realmServer, logger: opts.Logger, users: usermap.New(), meter: meter.New()}
+	reg := opts.Meter
+	if reg == nil {
+		reg = meter.New()
+	}
+	n := &Node{realm: realmServer, logger: opts.Logger, users: usermap.New(), meter: reg}
 	service, err := singtuic.NewService[int](singtuic.ServiceOptions{
 		Context:           context.Background(),
 		Logger:            opts.Logger,
@@ -219,7 +230,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "tuic"})
 		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
@@ -243,7 +254,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		defer outbound.Close()
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "tuic"})
 		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()

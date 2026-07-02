@@ -161,6 +161,75 @@ func (f *fakePacketConn) SetDeadline(t time.Time) error                  { retur
 func (f *fakePacketConn) SetReadDeadline(t time.Time) error              { return nil }
 func (f *fakePacketConn) SetWriteDeadline(t time.Time) error             { return nil }
 
+// TestSharedRegistryAcrossProtocols is the C.1 core: ONE Registry fed from
+// several "protocol sources" (as six egress nodes would share it) exposes a
+// unified billing/kick/snapshot surface for a UUID that spans all protocols.
+//   - CollectStats sums a UUID's bytes across protocols in one atomic read.
+//   - KickUser drops that UUID's conns on ALL protocols in one call.
+//   - Snapshot lists every protocol's conns, each tagged with ConnInfo.Protocol.
+func TestSharedRegistryAcrossProtocols(t *testing.T) {
+	reg := New() // the SHARED registry the six nodes would be given
+
+	// Same user "U" is active on three protocols at once; a different user "V"
+	// is active on one. Each Track is a distinct protocol source into one reg.
+	uHy, uHyPeer := net.Pipe()
+	uTuic, uTuicPeer := net.Pipe()
+	uReality, uRealityPeer := net.Pipe()
+	vTrojan, vTrojanPeer := net.Pipe()
+	defer func() { uHyPeer.Close(); uTuicPeer.Close(); uRealityPeer.Close(); vTrojanPeer.Close() }()
+
+	tU1 := reg.Track("U", uHy, ConnMeta{Destination: "a:1", Protocol: "hysteria2"})
+	tU2 := reg.Track("U", uTuic, ConnMeta{Destination: "b:2", Protocol: "tuic"})
+	tU3 := reg.Track("U", uReality, ConnMeta{Destination: "c:3", Protocol: "reality"})
+	_ = reg.Track("V", vTrojan, ConnMeta{Destination: "d:4", Protocol: "trojan"})
+
+	// Push some bytes so the merged bill is nonzero. Write on U's three conns
+	// (download += n each); their sum must land under the single UUID "U".
+	drain := func(peer net.Conn, n int) { go func() { peer.Read(make([]byte, n)) }() }
+	drain(uHyPeer, 4)
+	tU1.Write([]byte("aaaa")) // +4 download
+	drain(uTuicPeer, 5)
+	tU2.Write([]byte("bbbbb")) // +5 download
+	drain(uRealityPeer, 6)
+	tU3.Write([]byte("cccccc")) // +6 download
+
+	// 1. Billing合账: one CollectStats returns U's bytes SUMMED across the three
+	// protocols (4+5+6 = 15 download), atomically.
+	if s := statFor(reg.CollectStats(false), "U"); s.Download != 15 {
+		t.Fatalf("merged billing: U download=%d, want 15 (4+5+6 across 3 protocols)", s.Download)
+	}
+
+	// 3. Snapshot一次列全协议, each conn tagged with its protocol.
+	byProto := map[string]int{}
+	for _, ci := range reg.Snapshot() {
+		byProto[ci.Protocol]++
+		if ci.Protocol == "" {
+			t.Fatalf("snapshot conn missing Protocol tag: %+v", ci)
+		}
+	}
+	if byProto["hysteria2"] != 1 || byProto["tuic"] != 1 || byProto["reality"] != 1 || byProto["trojan"] != 1 {
+		t.Fatalf("snapshot protocol tally wrong: %v", byProto)
+	}
+
+	// 2. 一次踢全协议: KickUser("U") closes all THREE of U's conns in one call;
+	// V's trojan conn is untouched.
+	if n := reg.KickUser("U"); n != 3 {
+		t.Fatalf("KickUser(U)=%d, want 3 (one per protocol)", n)
+	}
+	for name, c := range map[string]net.Conn{"hysteria2": tU1, "tuic": tU2, "reality": tU3} {
+		if _, err := c.Write([]byte("x")); err == nil {
+			t.Fatalf("U's %s conn not closed after single KickUser", name)
+		}
+	}
+	// V still present and live.
+	if statFor(reg.CollectStats(false), "V").UUID != "V" {
+		t.Fatal("V wrongly dropped when kicking U")
+	}
+	if left := len(reg.Snapshot()); left != 1 {
+		t.Fatalf("after kicking U, snapshot len=%d, want 1 (V's trojan conn)", left)
+	}
+}
+
 // TestSnapshot verifies B.2 ActiveConnections: live conns appear with their
 // UUID/Destination and per-conn bytes; closed conns drop from the snapshot.
 func TestSnapshot(t *testing.T) {

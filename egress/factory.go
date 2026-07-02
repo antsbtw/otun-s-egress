@@ -66,6 +66,13 @@ type Config struct {
 	CertPEM string
 	KeyPEM  string
 
+	// Meter optionally injects a SHARED registry (C.1). When set, the built node
+	// meters/kicks/snapshots through it instead of a private one — so several
+	// protocol nodes given the same *Registry present one unified billing/kick/
+	// snapshot surface. Nil keeps the back-compat private-meter behavior. Prefer
+	// NewShared for the common "six protocols, one node" case.
+	Meter *Registry
+
 	// Logger is optional; a NOP logger is used when nil.
 	Logger logger.ContextLogger
 }
@@ -88,7 +95,7 @@ func New(cfg Config) (Node, error) {
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
-			ObfsPassword: cfg.ObfsPassword, Logger: lg,
+			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg,
 		})
 
 	case "tuic":
@@ -101,7 +108,7 @@ func New(cfg Config) (Node, error) {
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
-			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Logger: lg,
+			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Meter: cfg.Meter, Logger: lg,
 		})
 
 	case "reality":
@@ -115,6 +122,7 @@ func New(cfg Config) (Node, error) {
 			WrapTLS: buildWrapServerTLS(ctx, lg),
 			Reality: buildRealityServer(ctx, lg, cfg, hp),
 			UUID:    cfg.UUID,
+			Meter:   cfg.Meter,
 			Handler: egressPipe{lg: lg}.egress, Logger: lg,
 		})
 
@@ -122,7 +130,7 @@ func New(cfg Config) (Node, error) {
 		return trojannode.New(trojannode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password,
+			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password, Meter: cfg.Meter,
 			Handler: trojannode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
 		})
 
@@ -130,7 +138,7 @@ func New(cfg Config) (Node, error) {
 		return ssnode.New(ssnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password,
+			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password, Meter: cfg.Meter,
 			Handler: ssnode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
 		})
 
@@ -138,13 +146,44 @@ func New(cfg Config) (Node, error) {
 		return vmessnode.New(vmessnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
-			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID,
+			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter,
 			Handler: vmessnode.Handler(egressPipe{lg: lg}.egress), Logger: lg,
 		})
 
 	default:
 		return nil, errUnknownProtocol(cfg.Protocol)
 	}
+}
+
+// NewShared builds one Node per Config, all SHARING a single meter Registry
+// (C.1): the "one physical node, six protocols" layout. It returns the built
+// nodes (index-aligned with cfgs) and the shared Registry. Operate on that one
+// Registry and it covers every returned node at once:
+//
+//	nodes, reg, err := egress.NewShared(cfgs)   // six protocol Configs
+//	// … Start each node …
+//	stats := reg.CollectStats(true)   // per-UUID totals summed across all six
+//	reg.KickUser(uuid)                // drops the UUID on ALL six protocols
+//	conns := reg.Snapshot()           // every live conn; ConnInfo.Protocol tags it
+//
+// Each Config's own Meter field is overridden with the shared Registry; usermap
+// stays per-node (each protocol keeps its own index space). If any Config fails
+// to build, the already-built nodes are Closed and the error is returned.
+func NewShared(cfgs []Config) ([]Node, *Registry, error) {
+	reg := NewRegistry()
+	nodes := make([]Node, 0, len(cfgs))
+	for _, cfg := range cfgs {
+		cfg.Meter = reg
+		n, err := New(cfg)
+		if err != nil {
+			for _, built := range nodes {
+				_ = built.Close()
+			}
+			return nil, nil, err
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes, reg, nil
 }
 
 type unknownProtocolError string
