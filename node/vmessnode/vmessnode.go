@@ -41,6 +41,21 @@ import (
 	"github.com/antsbtw/otun-s-egress/underlay"
 )
 
+// systemDialer is the default egress: plain OS sockets out this node's IP.
+type systemDialer struct{}
+
+func (systemDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	var d net.Dialer
+	return d.DialContext(ctx, network, destination.String())
+}
+
+func (systemDialer) ListenPacket(ctx context.Context, destination M.Socksaddr) (net.PacketConn, error) {
+	var lc net.ListenConfig
+	return lc.ListenPacket(ctx, N.NetworkUDP, ":0")
+}
+
+var _ N.Dialer = systemDialer{}
+
 // Handler receives each decoded VMess session: the proxied destination and a
 // net.Conn carrying the payload. The caller decides what to do — dial the
 // destination on the open internet (egress), or echo (tests).
@@ -65,7 +80,11 @@ type Options struct {
 	Security string // unused server-side (negotiated by client); kept for symmetry
 	AlterId  int    // legacy alterId; 0 for AEAD-only
 
-	// Handler processes each decoded VMess session. Required.
+	// Egress dials proxied destinations from this node. If nil, a plain
+	// net.Dialer is used (exit = this node's default route / public IP).
+	Egress N.Dialer
+
+	// Handler processes each decoded VMess TCP session. Required.
 	Handler Handler
 	Logger  logger.Logger
 }
@@ -109,6 +128,10 @@ func New(opts Options) (*Node, error) {
 	if opts.Logger == nil {
 		opts.Logger = logger.NOP()
 	}
+	egress := opts.Egress
+	if egress == nil {
+		egress = systemDialer{}
+	}
 	realmServer, err := squic.NewServer(squic.Options{
 		ServerURL:   opts.ServerURL,
 		Token:       opts.Token,
@@ -125,7 +148,7 @@ func New(opts Options) (*Node, error) {
 	// Handler with the negotiated destination — same wiring as sing-box's
 	// vmess inbound (NewService + UpdateUsers + per-conn NewConnection).
 	node := &Node{realm: realmServer, logger: opts.Logger, wrapTLS: opts.WrapTLS, users: usermap.New(), meter: meter.New()}
-	node.service = vmess.NewService[int](egressHandler{handler: opts.Handler, logger: opts.Logger, node: node})
+	node.service = vmess.NewService[int](egressHandler{handler: opts.Handler, dialer: egress, logger: opts.Logger, node: node})
 	if err := node.UpdateUsers([]userattr.User{{UUID: opts.UUID, AlterId: opts.AlterId}}); err != nil {
 		return nil, E.Cause(err, "seed users")
 	}
@@ -231,10 +254,12 @@ func (n *Node) Close() error {
 }
 
 // egressHandler implements vmess.Handler (N.TCPConnectionHandlerEx +
-// N.UDPConnectionHandlerEx): it receives each decoded VMess session and passes
-// the destination + payload conn to the caller's Handler.
+// N.UDPConnectionHandlerEx): it receives each decoded VMess session and either
+// calls the TCP handler (TCP) or dials a real UDP socket on the open internet
+// and pipes packets (UDP).
 type egressHandler struct {
 	handler Handler
+	dialer  N.Dialer
 	logger  logger.Logger
 	node    *Node
 }
@@ -263,9 +288,19 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 				onClose(closeErr)
 			}
 		}()
-		// UDP-over-VMess egress is not exercised by M5 acceptance; surface the
-		// destination via the TCP handler path only. A production egress would
-		// dial a UDP socket here (see tuicnode for the pattern).
-		closeErr = bufio.CopyPacketConn(ctx, conn, conn)
+		outbound, err := h.dialer.ListenPacket(ctx, destination)
+		if err != nil {
+			closeErr = E.Cause(err, "egress listen packet")
+			h.logger.Warn(closeErr)
+			return
+		}
+		defer outbound.Close()
+		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
+		if idx, ok := userattr.IndexFromContext(ctx); ok {
+			if uuid, ok := h.node.UUIDForIndex(idx); ok {
+				conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String()})
+			}
+		}
+		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()
 }
