@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -42,6 +43,13 @@ type Config struct {
 	Token       string
 	RealmID     string
 	STUNServers []string
+
+	// RendezvousInsecureTLS skips TLS certificate verification when the egress
+	// connects to the rendezvous (会合面). Needed when the rendezvous serves a
+	// self-signed cert (pure-IP deployment, no public CA). Default false = verify.
+	// NOTE: this is the CONTROL channel to the rendezvous only; it does NOT affect
+	// the punched data-plane tunnel's own TLS.
+	RendezvousInsecureTLS bool
 
 	// Credentials (protocol-specific).
 	Password          string   // hy2/tuic/trojan/ss
@@ -87,6 +95,17 @@ func New(cfg Config) (Node, error) {
 		lg = logger.NOP()
 	}
 	hc := &http.Client{}
+	if cfg.RendezvousInsecureTLS {
+		// Clone DefaultTransport (not a bare &http.Transport{}) so we keep its
+		// ForceAttemptHTTP2/timeout defaults — a bare Transport would silently
+		// drop h2 ALPN negotiation with the rendezvous. Flip only the verify bit.
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{}
+		}
+		tr.TLSClientConfig.InsecureSkipVerify = true
+		hc = &http.Client{Transport: tr}
+	}
 
 	switch cfg.Protocol {
 	case "hysteria2":
