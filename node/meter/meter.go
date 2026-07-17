@@ -194,6 +194,32 @@ func (r *Registry) Snapshot() []ConnInfo {
 	return out
 }
 
+// ActiveUserCount returns the number of DISTINCT users with at least one live
+// connection right now (dedup by UUID) — the CAPACITY-WATERMARK metric (how
+// many user seats are occupied), as opposed to len(Snapshot()) which is the
+// UTILIZATION metric (connection count; one user may hold many conns). When
+// several protocol nodes share one Registry (C.1) the count spans all of them
+// in one call, deduped globally: a user on hy2+reality at once counts as 1.
+// Users tracked before but with zero live conns (state kept for billing until
+// CollectStats) do NOT count.
+func (r *Registry) ActiveUserCount() int {
+	r.mu.Lock()
+	states := make([]*userState, 0, len(r.users))
+	for _, s := range r.users {
+		states = append(states, s)
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, s := range states {
+		s.mu.Lock()
+		if len(s.conns) > 0 {
+			n++
+		}
+		s.mu.Unlock()
+	}
+	return n
+}
+
 // EvictUser kicks a user's live connections AND drops its state from the
 // registry (so CollectStats no longer returns a ghost row). Used on user removal
 // (R1 delete linkage): the removed user must both lose its live tunnels (R3) and

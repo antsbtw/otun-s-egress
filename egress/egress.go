@@ -69,4 +69,11 @@ type Node interface {
 	// realm-agent's obs risk-control (conn_lifecycle / egress_behavior). Metadata
 	// only (destination/source/bytes/start), never payload.
 	ActiveConnections() []ConnInfo
+	// ActiveUserCount returns the number of distinct users with at least one
+	// live connection (dedup by UUID) — the capacity-watermark metric (occupied
+	// user seats), vs ActiveConnections() which is the utilization metric
+	// (connection count; one user may hold many conns). With a shared Registry
+	// (C.1) the count spans every node sharing it, deduped globally across
+	// protocols: a user on hy2+reality at once counts as 1.
+	ActiveUserCount() int
 }

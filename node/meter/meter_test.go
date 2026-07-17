@@ -230,6 +230,55 @@ func TestSharedRegistryAcrossProtocols(t *testing.T) {
 	}
 }
 
+// TestActiveUserCount verifies the capacity-watermark metric: distinct users
+// with ≥1 live conn, deduped by UUID — NOT the connection count.
+//   - 3 conns with UUIDs [A, A, B] → 2 users (dedup within a user);
+//   - shared registry, same UUID on two protocols (hy2's A + reality's A) → 1
+//     (global cross-protocol dedup, the C.1 aggregation rule);
+//   - a user whose conns all closed no longer counts (state kept for billing
+//     must not inflate the watermark).
+func TestActiveUserCount(t *testing.T) {
+	r := New()
+	if n := r.ActiveUserCount(); n != 0 {
+		t.Fatalf("empty registry ActiveUserCount=%d, want 0", n)
+	}
+
+	// UUID A on two protocols (cross-protocol dedup) + a second conn shape,
+	// UUID B on one: 3 conns, 2 users.
+	a1, a1p := net.Pipe()
+	a2, a2p := net.Pipe()
+	b1, b1p := net.Pipe()
+	defer func() { a1p.Close(); a2p.Close(); b1p.Close() }()
+	ta1 := r.Track("A", a1, ConnMeta{Protocol: "hysteria2"})
+	ta2 := r.Track("A", a2, ConnMeta{Protocol: "reality"})
+	tb1 := r.Track("B", b1, ConnMeta{Protocol: "hysteria2"})
+
+	if got := len(r.Snapshot()); got != 3 {
+		t.Fatalf("connection count=%d, want 3 (utilization metric)", got)
+	}
+	if n := r.ActiveUserCount(); n != 2 {
+		t.Fatalf("ActiveUserCount=%d, want 2 (A deduped across hy2+reality, B)", n)
+	}
+
+	// Close one of A's conns: A still has one live conn → still 2 users.
+	ta1.Close()
+	if n := r.ActiveUserCount(); n != 2 {
+		t.Fatalf("after closing one of A's conns ActiveUserCount=%d, want 2", n)
+	}
+	// Close A's last conn: A drops out (billing state remains, must not count).
+	ta2.Close()
+	if n := r.ActiveUserCount(); n != 1 {
+		t.Fatalf("after closing all of A's conns ActiveUserCount=%d, want 1 (only B)", n)
+	}
+	if statFor(r.CollectStats(false), "A").UUID != "A" {
+		t.Fatal("A's billing state unexpectedly gone (EvictUser semantics leaked)")
+	}
+	tb1.Close()
+	if n := r.ActiveUserCount(); n != 0 {
+		t.Fatalf("all conns closed ActiveUserCount=%d, want 0", n)
+	}
+}
+
 // TestSnapshot verifies B.2 ActiveConnections: live conns appear with their
 // UUID/Destination and per-conn bytes; closed conns drop from the snapshot.
 func TestSnapshot(t *testing.T) {

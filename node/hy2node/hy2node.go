@@ -94,6 +94,13 @@ func (n *Node) KickUser(uuid string) int { return n.meter.KickUser(uuid) }
 // realm-agent obs risk-control (B.2).
 func (n *Node) ActiveConnections() []meter.ConnInfo { return n.meter.Snapshot() }
 
+// ActiveUserCount returns the number of distinct users with at least one live
+// connection (dedup by UUID) — the capacity-watermark metric, vs
+// ActiveConnections() which is the utilization metric (connection count). With
+// a shared Registry (C.1) the count spans every node sharing it, deduped
+// globally across protocols.
+func (n *Node) ActiveUserCount() int { return n.meter.ActiveUserCount() }
+
 // New builds (but does not start) a Hysteria2 egress node.
 func New(opts Options) (*Node, error) {
 	if opts.TLSConfig == nil {
