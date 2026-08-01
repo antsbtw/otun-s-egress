@@ -19,7 +19,7 @@ import (
 
 	sbtls "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/option"
-	singhy2 "github.com/sagernet/sing-quic/hysteria2"
+	singhy2 "github.com/antsbtw/sing-quic/hysteria2"
 	"github.com/sagernet/sing/common/logger"
 )
 

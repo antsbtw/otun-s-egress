@@ -28,8 +28,8 @@ import (
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 
 	"github.com/gofrs/uuid/v5"
-	squic "github.com/sagernet/sing-quic/hysteria2/realm"
-	singtuic "github.com/sagernet/sing-quic/tuic"
+	squic "github.com/antsbtw/sing-quic/hysteria2/realm"
+	singtuic "github.com/antsbtw/sing-quic/tuic"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -46,6 +46,10 @@ type Options struct {
 	RealmID     string // slot to register under
 	STUNServers []string
 	Resolver    squic.Resolver
+	// PunchObserver, when non-nil, receives receiver-side punch engine
+	// notifications (assembled by node/punchtrace). nil = observation off
+	// (production default).
+	PunchObserver squic.PunchObserver
 	HTTPClient  *http.Client // rendezvous HTTP client; nil => http.DefaultClient
 
 	// TUIC server params.
@@ -125,6 +129,7 @@ func New(opts Options) (*Node, error) {
 		Resolver:    opts.Resolver,
 		HTTPClient:  opts.HTTPClient,
 		Logger:      opts.Logger,
+		Observer:    opts.PunchObserver,
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")

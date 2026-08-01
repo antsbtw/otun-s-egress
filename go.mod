@@ -7,7 +7,7 @@ require (
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4
 	github.com/sagernet/sing v0.8.11-0.20260514110501-905ad103a4df
 	github.com/sagernet/sing-box v1.14.0-alpha.26
-	github.com/sagernet/sing-quic v0.6.2-0.20260525051024-9467ede27fb7
+	github.com/antsbtw/sing-quic v0.6.2-0.20260525051024-9467ede27fb7
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1
 )
@@ -59,3 +59,8 @@ require (
 	golang.org/x/time v0.11.0 // indirect
 	golang.org/x/tools v0.45.0 // indirect
 )
+
+// TEMPORARY (dev only): antsbtw/sing-quic fork not yet pushed to GitHub.
+// Replace with the real pushed pseudo-version before merging — a local-path
+// replace must never reach CI (it is ignored by consumers anyway).
+replace github.com/antsbtw/sing-quic => ../sing-quic-punch-observer

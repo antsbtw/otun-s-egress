@@ -32,7 +32,7 @@ import (
 	"net/netip"
 	"sync"
 
-	squic "github.com/sagernet/sing-quic/hysteria2/realm"
+	squic "github.com/antsbtw/sing-quic/hysteria2/realm"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"

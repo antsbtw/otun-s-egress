@@ -30,8 +30,8 @@ import (
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
 
-	singhy2 "github.com/sagernet/sing-quic/hysteria2"
-	"github.com/sagernet/sing-quic/hysteria2/realm"
+	singhy2 "github.com/antsbtw/sing-quic/hysteria2"
+	"github.com/antsbtw/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -49,6 +49,10 @@ type Options struct {
 	STUNServers []string
 	Resolver    realm.Resolver
 	HTTPClient  *http.Client // rendezvous HTTP client; nil => http.DefaultClient
+	// PunchObserver, when non-nil, receives receiver-side punch engine
+	// notifications (assembled by node/punchtrace). nil = observation off
+	// (production default).
+	PunchObserver realm.PunchObserver
 
 	// Hysteria2 server params.
 	TLSConfig aTLS.ServerConfig // caller-built (cert/key); required
@@ -136,6 +140,7 @@ func New(opts Options) (*Node, error) {
 			Resolver:    opts.Resolver,
 			HTTPClient:  httpClient,
 			Logger:      opts.Logger,
+			Observer:    opts.PunchObserver,
 		},
 	})
 	if err != nil {

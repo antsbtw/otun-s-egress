@@ -20,7 +20,7 @@ import (
 	"github.com/antsbtw/otun-s-egress/transport/realm"
 	"github.com/antsbtw/otun-s-egress/underlay"
 
-	"github.com/sagernet/sing-quic/tuic"
+	"github.com/antsbtw/sing-quic/tuic"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	aTLS "github.com/sagernet/sing/common/tls"

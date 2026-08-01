@@ -27,7 +27,7 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go"
-	qtls "github.com/sagernet/sing-quic"
+	qtls "github.com/antsbtw/sing-quic"
 	E "github.com/sagernet/sing/common/exceptions"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"

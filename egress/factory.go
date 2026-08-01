@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/antsbtw/otun-s-egress/node/hy2node"
+	"github.com/antsbtw/otun-s-egress/node/punchtrace"
 	"github.com/antsbtw/otun-s-egress/node/realitynode"
 	"github.com/antsbtw/otun-s-egress/node/ssnode"
 	"github.com/antsbtw/otun-s-egress/node/trojannode"
@@ -29,6 +30,8 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/gofrs/uuid/v5"
+
+	squic "github.com/antsbtw/sing-quic/hysteria2/realm"
 )
 
 // Config selects and parameterizes one egress node. Rendezvous coordinates plus
@@ -83,6 +86,13 @@ type Config struct {
 
 	// Logger is optional; a NOP logger is used when nil.
 	Logger logger.ContextLogger
+
+	// PunchTraceSink optionally turns on receiver-side punch tracing: when
+	// non-nil, every finished punch answer attempt is assembled into a
+	// punchtrace.Record (node/punchtrace) and handed to this sink — the H1
+	// (one-way false success) measurement. Nil — the production default —
+	// leaves the punch engine unobserved.
+	PunchTraceSink punchtrace.Sink
 }
 
 // New builds (does not Start) an egress Node for cfg.Protocol. TLS is a
@@ -106,6 +116,12 @@ func New(cfg Config) (Node, error) {
 		tr.TLSClientConfig.InsecureSkipVerify = true
 		hc = &http.Client{Transport: tr}
 	}
+	// Declared as the interface (not *punchtrace.Observer) so a nil sink yields
+	// a genuinely nil interface — the engine's observer != nil gate stays false.
+	var punchObserver squic.PunchObserver
+	if cfg.PunchTraceSink != nil {
+		punchObserver = punchtrace.New(cfg.Protocol, cfg.PunchTraceSink)
+	}
 
 	switch cfg.Protocol {
 	case "hysteria2":
@@ -115,6 +131,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
 			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	case "tuic":
@@ -128,6 +145,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
 			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Meter: cfg.Meter, Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	case "reality":
@@ -143,6 +161,7 @@ func New(cfg Config) (Node, error) {
 			UUID:    cfg.UUID,
 			Meter:   cfg.Meter,
 			Handler: egressPipe{lg: lg}.egress, Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	case "trojan":
@@ -151,6 +170,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password, Meter: cfg.Meter,
 			Handler: trojannode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	case "shadowsocks":
@@ -159,6 +179,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password, Meter: cfg.Meter,
 			Handler: ssnode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	case "vmess":
@@ -167,6 +188,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter,
 			Handler: vmessnode.Handler(egressPipe{lg: lg}.egress), Logger: lg,
+			PunchObserver: punchObserver,
 		})
 
 	default:

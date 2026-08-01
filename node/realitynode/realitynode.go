@@ -26,7 +26,7 @@ import (
 	"sync"
 
 	sbtls "github.com/sagernet/sing-box/common/tls"
-	squic "github.com/sagernet/sing-quic/hysteria2/realm"
+	squic "github.com/antsbtw/sing-quic/hysteria2/realm"
 	"github.com/sagernet/sing-vmess/vless"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -53,6 +53,10 @@ type Options struct {
 	RealmID     string
 	STUNServers []string
 	Resolver    squic.Resolver
+	// PunchObserver, when non-nil, receives receiver-side punch engine
+	// notifications (assembled by node/punchtrace). nil = observation off
+	// (production default).
+	PunchObserver squic.PunchObserver
 	HTTPClient  *http.Client
 
 	// WrapTLS is the outer QUIC/TLS server config for WrapStream (the reliable
@@ -131,6 +135,7 @@ func New(opts Options) (*Node, error) {
 		Resolver:    opts.Resolver,
 		HTTPClient:  opts.HTTPClient,
 		Logger:      opts.Logger,
+		Observer:    opts.PunchObserver,
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")
