@@ -25,8 +25,8 @@ import (
 	"net/http"
 	"sync"
 
-	sbtls "github.com/sagernet/sing-box/common/tls"
 	squic "github.com/antsbtw/sing-quic/hysteria2/realm"
+	sbtls "github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-vmess/vless"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
@@ -37,6 +37,7 @@ import (
 	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
+	otunrealm "github.com/antsbtw/otun-s-egress/transport/realm"
 	"github.com/antsbtw/otun-s-egress/underlay"
 )
 
@@ -52,12 +53,16 @@ type Options struct {
 	Token       string
 	RealmID     string
 	STUNServers []string
-	Resolver    squic.Resolver
+	// RelayAddresses 非空 → 启用中继回退：收到会合面打洞事件时，本节点在打洞的
+	// 同时向这些中继报到（报同一 nonce），供客户端打洞失败时经中继对接。
+	// 空 = 不启用，行为与改动前一致。详见 egress.Config.RelayAddresses。
+	RelayAddresses []string
+	Resolver       squic.Resolver
 	// PunchObserver, when non-nil, receives receiver-side punch engine
 	// notifications (assembled by node/punchtrace). nil = observation off
 	// (production default).
 	PunchObserver squic.PunchObserver
-	HTTPClient  *http.Client
+	HTTPClient    *http.Client
 
 	// WrapTLS is the outer QUIC/TLS server config for WrapStream (the reliable
 	// stream carrying Reality). Caller-built.
@@ -127,15 +132,22 @@ func New(opts Options) (*Node, error) {
 	if opts.Logger == nil {
 		opts.Logger = logger.NOP()
 	}
+	// 中继地址：解析失败即报错而非静默丢弃 —— 配错了要立刻可见，
+	// 否则会静默退回纯打洞、在对称 NAT 客户端上表现为"改了没用"，极难排查。
+	relayAddrs, err := otunrealm.ParseRelayAddresses(opts.RelayAddresses)
+	if err != nil {
+		return nil, err
+	}
 	realmServer, err := squic.NewServer(squic.Options{
-		ServerURL:   opts.ServerURL,
-		Token:       opts.Token,
-		RealmID:     opts.RealmID,
-		STUNServers: opts.STUNServers,
-		Resolver:    opts.Resolver,
-		HTTPClient:  opts.HTTPClient,
-		Logger:      opts.Logger,
-		Observer:    opts.PunchObserver,
+		ServerURL:      opts.ServerURL,
+		Token:          opts.Token,
+		RealmID:        opts.RealmID,
+		STUNServers:    opts.STUNServers,
+		RelayAddresses: relayAddrs,
+		Resolver:       opts.Resolver,
+		HTTPClient:     opts.HTTPClient,
+		Logger:         opts.Logger,
+		Observer:       opts.PunchObserver,
 	})
 	if err != nil {
 		return nil, E.Cause(err, "create realm server")

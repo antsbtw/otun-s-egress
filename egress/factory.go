@@ -47,6 +47,30 @@ type Config struct {
 	RealmID     string
 	STUNServers []string
 
+	// DirectAddresses 非空 → direct 模式：本节点是固定公网 IP（或 1:1 静态 NAT，
+	// 如 AWS Elastic IP），无需 STUN 反射 + 双向打洞对撞。直接把这些 "IP:port"
+	// 上报给客户端当连接目标，且打洞仅被动应答。
+	//
+	// 动因：客户端侧若是对称 NAT（实测中国移动蜂窝即是，同一 socket 打两个 STUN
+	// 得到相差三万的端口），双向对撞必败；而本节点地址本就固定可直连，客户端主动
+	// 发包后其 NAT 会为该会话放行回程（等同标准 hysteria2 直连）——从而绕开死结。
+	//
+	// 空 = 完全走原 STUN 打洞逻辑，其它节点零影响。
+	DirectAddresses []string
+
+	// RelayAddresses 非空 → 启用中继回退（RELAY_FALLBACK_DESIGN.md §3.2）。
+	//
+	// 与 DirectAddresses 解决的是**不同**问题：DirectAddresses 要求本节点有固定
+	// 公网 IP（机房 VPS 才成立）；私宅节点没有固定入口，只能靠双方各自主动出站
+	// 连一台公网中继、由中继按 nonce 把两条流对接。出口仍是本节点的住宅 IP。
+	//
+	// 收到会合面打洞事件时，本节点在打洞的**同时**向这些中继报到（报事件里的
+	// nonce）。打洞成功 → 客户端不会去连中继，中继侧等待项超时自动回收，零成本；
+	// 打洞失败 → 客户端转中继时本节点已在那儿等着。
+	//
+	// 空 = 不启用，行为与改动前逐字节一致。
+	RelayAddresses []string
+
 	// RendezvousInsecureTLS skips TLS certificate verification when the egress
 	// connects to the rendezvous (会合面). Needed when the rendezvous serves a
 	// self-signed cert (pure-IP deployment, no public CA). Default false = verify.
@@ -128,7 +152,9 @@ func New(cfg Config) (Node, error) {
 		sni, alpn := tlsParams(cfg)
 		return hy2node.New(hy2node.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, DirectAddresses: cfg.DirectAddresses,
+			RelayAddresses: cfg.RelayAddresses,
+			Resolver:       systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
 			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg,
 			PunchObserver: punchObserver,
@@ -142,7 +168,8 @@ func New(cfg Config) (Node, error) {
 		}
 		return tuicnode.New(tuicnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
+			Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
 			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Meter: cfg.Meter, Logger: lg,
 			PunchObserver: punchObserver,
@@ -155,7 +182,8 @@ func New(cfg Config) (Node, error) {
 		}
 		return realitynode.New(realitynode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
+			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg),
 			Reality: buildRealityServer(ctx, lg, cfg, hp),
 			UUID:    cfg.UUID,
@@ -167,7 +195,8 @@ func New(cfg Config) (Node, error) {
 	case "trojan":
 		return trojannode.New(trojannode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
+			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password, Meter: cfg.Meter,
 			Handler: trojannode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
 			PunchObserver: punchObserver,
@@ -176,7 +205,8 @@ func New(cfg Config) (Node, error) {
 	case "shadowsocks":
 		return ssnode.New(ssnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
+			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password, Meter: cfg.Meter,
 			Handler: ssnode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
 			PunchObserver: punchObserver,
@@ -185,7 +215,8 @@ func New(cfg Config) (Node, error) {
 	case "vmess":
 		return vmessnode.New(vmessnode.Options{
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
-			STUNServers: cfg.STUNServers, Resolver: systemResolver, HTTPClient: hc,
+			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
+			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter,
 			Handler: vmessnode.Handler(egressPipe{lg: lg}.egress), Logger: lg,
 			PunchObserver: punchObserver,

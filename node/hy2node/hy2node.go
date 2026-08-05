@@ -21,14 +21,17 @@ package hy2node
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/antsbtw/otun-s-egress/node/meter"
 	"github.com/antsbtw/otun-s-egress/node/userattr"
 	"github.com/antsbtw/otun-s-egress/node/usermap"
+	otunrealm "github.com/antsbtw/otun-s-egress/transport/realm"
 
 	singhy2 "github.com/antsbtw/sing-quic/hysteria2"
 	"github.com/antsbtw/sing-quic/hysteria2/realm"
@@ -47,8 +50,15 @@ type Options struct {
 	Token       string // realm token
 	RealmID     string // slot to register under
 	STUNServers []string
-	Resolver    realm.Resolver
-	HTTPClient  *http.Client // rendezvous HTTP client; nil => http.DefaultClient
+	// DirectAddresses 非空 → direct 模式：跳过 STUN 反射与双向打洞对撞，
+	// 直接上报这些固定 "IP:port" 给客户端，打洞仅被动应答。详见 egress.Config。
+	DirectAddresses []string
+	// RelayAddresses 非空 → 启用中继回退：收到会合面打洞事件时，本节点在打洞的
+	// 同时向这些中继报到（报同一 nonce），供客户端打洞失败时经中继对接。
+	// 空 = 不启用，行为与改动前一致。详见 egress.Config.RelayAddresses。
+	RelayAddresses []string
+	Resolver       realm.Resolver
+	HTTPClient     *http.Client // rendezvous HTTP client; nil => http.DefaultClient
 	// PunchObserver, when non-nil, receives receiver-side punch engine
 	// notifications (assembled by node/punchtrace). nil = observation off
 	// (production default).
@@ -125,6 +135,21 @@ func New(opts Options) (*Node, error) {
 	if reg == nil {
 		reg = meter.New()
 	}
+	// direct 模式地址：解析失败即报错而非静默丢弃 —— 配错了要立刻可见，
+	// 否则会静默退回打洞、在对称 NAT 客户端上表现为"改了没用"，极难排查。
+	var directAddrs []netip.AddrPort
+	for _, s := range opts.DirectAddresses {
+		ap, parseErr := netip.ParseAddrPort(s)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse direct_addresses %q: %w", s, parseErr)
+		}
+		directAddrs = append(directAddrs, ap)
+	}
+	// 中继地址同口径：解析失败即报错，不静默丢弃（理由同上）。
+	relayAddrs, err := otunrealm.ParseRelayAddresses(opts.RelayAddresses)
+	if err != nil {
+		return nil, err
+	}
 	n := &Node{logger: opts.Logger, users: usermap.New(), meter: reg}
 	service, err := singhy2.NewService[int](singhy2.ServiceOptions{
 		Context:            context.Background(),
@@ -133,14 +158,16 @@ func New(opts Options) (*Node, error) {
 		SalamanderPassword: opts.ObfsPassword,
 		Handler:            egressHandler{dialer: egress, logger: opts.Logger, node: n},
 		RealmOptions: &realm.Options{
-			ServerURL:   opts.ServerURL,
-			Token:       opts.Token,
-			RealmID:     opts.RealmID,
-			STUNServers: opts.STUNServers,
-			Resolver:    opts.Resolver,
-			HTTPClient:  httpClient,
-			Logger:      opts.Logger,
-			Observer:    opts.PunchObserver,
+			ServerURL:       opts.ServerURL,
+			Token:           opts.Token,
+			RealmID:         opts.RealmID,
+			STUNServers:     opts.STUNServers,
+			DirectAddresses: directAddrs,
+			RelayAddresses:  relayAddrs,
+			Resolver:        opts.Resolver,
+			HTTPClient:      httpClient,
+			Logger:          opts.Logger,
+			Observer:        opts.PunchObserver,
 		},
 	})
 	if err != nil {
