@@ -8,6 +8,8 @@ github.com/antsbtw/sing-quic v0.6.2-0.20260805113808-3c4f73b6f7ee h1:YqizqIzWNd8
 github.com/antsbtw/sing-quic v0.6.2-0.20260805113808-3c4f73b6f7ee/go.mod h1:InZoOUntWuq6Q09IjP2Qb/dtu06TbwwXMUR6ZBJTn5E=
 github.com/antsbtw/sing-quic v0.6.2-0.20260806135107-a5ce10433257 h1:SQkV0OuR++TrIn7anXJyVJfXXZdtR8CcSqsRZ6OuNYk=
 github.com/antsbtw/sing-quic v0.6.2-0.20260806135107-a5ce10433257/go.mod h1:InZoOUntWuq6Q09IjP2Qb/dtu06TbwwXMUR6ZBJTn5E=
+github.com/antsbtw/sing-quic v0.6.2-0.20260812143809-87a68fd39698 h1:snGVHTI6bTj4LrwoXencyT4LoG/iw6/lArmvY1PfELk=
+github.com/antsbtw/sing-quic v0.6.2-0.20260812143809-87a68fd39698/go.mod h1:InZoOUntWuq6Q09IjP2Qb/dtu06TbwwXMUR6ZBJTn5E=
 github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6 h1:LYSB6VgWzKtNrcxElw3c97BP40Oc7bizKxA9K1Vi/5k=
 github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6/go.mod h1:llW/CvsNmza8S6hmsuggsZeiX+uS27dkqY27wDIuBWg=
 github.com/caddyserver/zerossl v0.1.5 h1:dkvOjBAEEtY6LIGAHei7sw2UgqSD6TrWweXpV7lvEvE=
