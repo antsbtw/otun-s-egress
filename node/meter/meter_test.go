@@ -314,3 +314,60 @@ func TestSnapshot(t *testing.T) {
 		t.Fatalf("Snapshot after close len=%d, want 0", n)
 	}
 }
+
+// TestRestoreStatsRebillsAfterFailedHandoff locks the rollback half of the
+// billing contract: bytes read by CollectStats(true) but never durably billed
+// must be re-billable, not silently lost.
+func TestRestoreStatsRebillsAfterFailedHandoff(t *testing.T) {
+	r := New()
+	s := r.state("u1")
+	s.up.Add(300)
+	s.down.Add(700)
+
+	billed := r.CollectStats(true)
+	if len(billed) != 1 || billed[0].Upload != 300 || billed[0].Download != 700 {
+		t.Fatalf("first collect = %+v, want up=300 down=700", billed)
+	}
+	// Counters are zero now — this is the window where a failed upload loses bytes.
+	if got := r.CollectStats(true); len(got) != 1 || got[0].Upload != 0 || got[0].Download != 0 {
+		t.Fatalf("after reset = %+v, want zeroes", got)
+	}
+
+	// Handoff failed → credit back. Traffic that accrued during the failed upload
+	// must survive too, so restore is additive, not a store.
+	s.up.Add(11)
+	s.down.Add(22)
+	r.RestoreStats(billed)
+
+	again := r.CollectStats(true)
+	if len(again) != 1 || again[0].Upload != 311 || again[0].Download != 722 {
+		t.Fatalf("after restore = %+v, want up=311 down=722 (restored + in-flight)", again)
+	}
+}
+
+// TestRestoreStatsRecreatesEvictedUser: a user evicted between collect and a
+// failed report still owes real bytes; restore must not drop them.
+func TestRestoreStatsRecreatesEvictedUser(t *testing.T) {
+	r := New()
+	s := r.state("gone")
+	s.up.Add(500)
+	billed := r.CollectStats(true)
+	r.EvictUser("gone")
+
+	r.RestoreStats(billed)
+
+	got := r.CollectStats(true)
+	if len(got) != 1 || got[0].UUID != "gone" || got[0].Upload != 500 {
+		t.Fatalf("after restore of evicted user = %+v, want gone/up=500", got)
+	}
+}
+
+// TestRestoreStatsIgnoresZeroRows keeps restore from resurrecting rows for users
+// who owed nothing (they would just be noise in the next collect).
+func TestRestoreStatsIgnoresZeroRows(t *testing.T) {
+	r := New()
+	r.RestoreStats([]UserStat{{UUID: "z", Upload: 0, Download: 0}})
+	if got := r.CollectStats(false); len(got) != 0 {
+		t.Fatalf("zero-row restore created %+v, want no rows", got)
+	}
+}

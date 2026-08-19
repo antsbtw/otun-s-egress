@@ -9,6 +9,11 @@
 // OBSERVABILITY path. The two MUST NOT share one reset=true call, or billing
 // undercounts (the realm-agent collector's hard rule).
 //
+// Because reset=true is destructive, exactly-once holds only if the caller
+// durably hands off what it read. If the handoff fails, the caller MUST call
+// RestoreStats to credit the bytes back; otherwise the contract degrades to
+// at-most-once and silently undercounts.
+//
 // R3 (kick): KickUser(uuid) force-closes every live connection of a user (quota
 // expiry / removal). Registration is keyed by UUID so a kick is O(live conns of
 // that user).
@@ -150,6 +155,35 @@ func (r *Registry) CollectStats(reset bool) []UserStat {
 		out = append(out, UserStat{UUID: uuid, Upload: up, Download: down})
 	}
 	return out
+}
+
+// RestoreStats credits bytes BACK to the counters after a failed bill — the
+// rollback half of CollectStats(true)'s destructive read.
+//
+// Why this exists: CollectStats(true) zeroes as it reads, so once it returns, the
+// only copy of those bytes is the caller's slice. If the caller then fails to
+// durably hand them off (upload failed AND the on-disk spool failed), the bytes
+// are gone — the counters already read zero. That turns the documented
+// bill-each-byte-exactly-once contract into at-most-once, always losing in the
+// operator's favor (undercounting).
+//
+// RestoreStats adds the values back, so the next collection re-bills them. It is
+// additive (not a Store) because live connections keep counting during the failed
+// upload; overwriting would discard whatever accrued in that window.
+//
+// Only for the failure path. Calling it after a SUCCESSFUL report double-bills.
+// Users evicted between collect and restore are intentionally re-created here as
+// counter-only rows (no live conns): dropping them would lose real billable bytes
+// the user already spent, and the row is reaped on the next successful collect.
+func (r *Registry) RestoreStats(stats []UserStat) {
+	for _, st := range stats {
+		if st.Upload == 0 && st.Download == 0 {
+			continue
+		}
+		s := r.state(st.UUID)
+		s.up.Add(st.Upload)
+		s.down.Add(st.Download)
+	}
 }
 
 // KickUser force-closes all live connections of a user and returns how many were
