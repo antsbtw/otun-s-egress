@@ -128,18 +128,7 @@ func New(cfg Config) (Node, error) {
 	if lg == nil {
 		lg = logger.NOP()
 	}
-	hc := &http.Client{}
-	if cfg.RendezvousInsecureTLS {
-		// Clone DefaultTransport (not a bare &http.Transport{}) so we keep its
-		// ForceAttemptHTTP2/timeout defaults — a bare Transport would silently
-		// drop h2 ALPN negotiation with the rendezvous. Flip only the verify bit.
-		tr := http.DefaultTransport.(*http.Transport).Clone()
-		if tr.TLSClientConfig == nil {
-			tr.TLSClientConfig = &tls.Config{}
-		}
-		tr.TLSClientConfig.InsecureSkipVerify = true
-		hc = &http.Client{Transport: tr}
-	}
+	hc := rendezvousHTTPClient(cfg.RendezvousInsecureTLS)
 	// Declared as the interface (not *punchtrace.Observer) so a nil sink yields
 	// a genuinely nil interface — the engine's observer != nil gate stays false.
 	var punchObserver squic.PunchObserver
@@ -378,4 +367,41 @@ func systemResolver(ctx context.Context, host string, _, _ bool) ([]netip.Addr, 
 		return []netip.Addr{a}, nil
 	}
 	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
+// Rendezvous HTTP/2 health check: a PING after this much read silence, and the
+// connection is dropped if the PING is not answered within rendezvousPingTimeout.
+// var only so tests can shorten them.
+var (
+	rendezvousSendPingTimeout = 15 * time.Second
+	rendezvousPingTimeout     = 10 * time.Second
+)
+
+// rendezvousHTTPClient builds the client for the rendezvous control channel
+// (register / heartbeat / event stream all multiplex one HTTP/2 connection).
+//
+// It clones DefaultTransport (not a bare &http.Transport{}) so we keep its
+// ForceAttemptHTTP2/timeout defaults — a bare Transport would silently drop h2
+// ALPN negotiation with the rendezvous.
+//
+// HTTP/2 PINGs are required: without them a half-dead TCP connection (seen on
+// CN residential uplinks → SG rendezvous) is reused by every later request and
+// the event stream blocks silently until the kernel TCP timeout. 2026-09-29
+// egress-nn-01: heartbeats stalled, the slot expired at the rendezvous (60s
+// TTL) → clients got realm_not_found until agent self-heal rebuilt all nodes.
+// No http.Client.Timeout: the event stream is a long-lived request; per-request
+// deadlines for register/heartbeat live in sing-quic's realm server.
+func rendezvousHTTPClient(insecure bool) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	if insecure {
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{}
+		}
+		tr.TLSClientConfig.InsecureSkipVerify = true
+	}
+	tr.HTTP2 = &http.HTTP2Config{
+		SendPingTimeout: rendezvousSendPingTimeout,
+		PingTimeout:     rendezvousPingTimeout,
+	}
+	return &http.Client{Transport: tr}
 }
