@@ -284,7 +284,7 @@ func (h ssHandler) NewConnection(ctx context.Context, conn net.Conn, metadata M.
 	h.node.logger.Info("shadowsocks stream user=", userattr.Label(ctx), " -> ", metadata.Destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := h.node.UUIDForIndex(idx); ok {
-			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: metadata.Destination.String(), Protocol: "shadowsocks"})
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: metadata.Destination.String(), Source: metadata.Source.String(), Protocol: "shadowsocks"})
 		}
 	}
 	h.node.opts.Handler(ctx, conn, metadata.Destination)

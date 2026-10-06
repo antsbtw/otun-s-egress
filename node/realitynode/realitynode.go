@@ -267,7 +267,7 @@ func (h vlessHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source
 		h.node.logger.Info("reality(vless) user=", userattr.Label(ctx), " -> ", destination)
 		if idx, ok := userattr.IndexFromContext(ctx); ok {
 			if uuid, ok := h.node.UUIDForIndex(idx); ok {
-				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "reality"})
+				conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Source: source.String(), Protocol: "reality"})
 			}
 		}
 		h.node.opts.Handler(ctx, conn, destination)

@@ -236,7 +236,7 @@ func (n *Node) acceptLoop(ctx context.Context) {
 func (n *Node) handleStream(ctx context.Context, stream net.Conn) {
 	// trojan.Service reads the request header (key + CRLF + command + destination)
 	// and calls our serviceHandler with the post-header conn + destination.
-	err := n.service.NewConnection(ctx, stream, M.Socksaddr{}, func(it error) {
+	err := n.service.NewConnection(ctx, stream, M.SocksaddrFromNet(stream.RemoteAddr()), func(it error) {
 		if it != nil && ctx.Err() == nil {
 			n.logger.Warn(E.Cause(it, "trojan stream closed"))
 		}
@@ -254,12 +254,12 @@ type serviceHandler Node
 
 var _ trojan.Handler = (*serviceHandler)(nil)
 
-func (h *serviceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, _ M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
+func (h *serviceHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	n := (*Node)(h)
 	n.logger.Info("trojan stream user=", userattr.Label(ctx), " to ", destination)
 	if idx, ok := userattr.IndexFromContext(ctx); ok {
 		if uuid, ok := n.UUIDForIndex(idx); ok {
-			conn = n.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "trojan"})
+			conn = n.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Source: source.String(), Protocol: "trojan"})
 		}
 	}
 	n.opts.Handler(ctx, conn, destination)

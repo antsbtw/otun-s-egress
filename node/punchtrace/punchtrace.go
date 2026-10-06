@@ -34,9 +34,10 @@ type Record struct {
 	Nonce          string `json:"nonce"`
 	LocalAttemptID string `json:"local_attempt_id"`
 	Protocol       string `json:"protocol"`
-	// RespondMode is always "punch": the production engine has no direct
-	// (passive-only) mode. The field exists so direct-mode data can join the
-	// same table without a schema change.
+	// RespondMode is "punch" for answer attempts and "relay" for relay-session
+	// summaries (RelaySessionClosed). The production engine has no direct
+	// (passive-only) mode. Consumers counting punch attempts must filter
+	// respond_mode='punch'.
 	RespondMode string `json:"respond_mode"`
 
 	StartTS        string   `json:"start_ts"`
@@ -61,6 +62,21 @@ type Record struct {
 	Error          string `json:"error,omitempty"`
 	FinishTS       string `json:"finish_ts"`
 	DurationMS     int64  `json:"duration_ms"`
+
+	// relay_* are set only on respond_mode="relay" records: one per node-side
+	// relay session, emitted when it ends. RelayLoopbackAddr is the address the
+	// protocol server saw for this session (127.0.0.1:L) — the same value the
+	// meter writes as conn_lifecycle source — so nonce → loopback → user/bytes
+	// joins a relayed connection to its user. OK means data actually flowed
+	// through a relay (RelayActive set), not merely that a relay acked.
+	RelayLoopbackAddr string   `json:"relay_loopback_addr,omitempty"`
+	RelayActive       string   `json:"relay_active,omitempty"`
+	RelayAcked        []string `json:"relay_acked,omitempty"`
+	RelayOffered      []string `json:"relay_offered,omitempty"`
+	RelayFirstAckMS   int64    `json:"relay_first_ack_ms,omitempty"`
+	RelayBytesIn      uint64   `json:"relay_bytes_in,omitempty"`
+	RelayBytesOut     uint64   `json:"relay_bytes_out,omitempty"`
+	RelayCloseReason  string   `json:"relay_close_reason,omitempty"`
 }
 
 // Sink receives each finished Record. Called synchronously from the punch
@@ -209,6 +225,41 @@ func (o *Observer) evictStalestLocked() {
 	}
 }
 
+// RelaySessionClosed implements realm.RelaySessionObserver: one "relay" record
+// per node-side relay session. Sessions that never got an ack (no_ack — the
+// usual case when the punch succeeded and the client never came) are skipped:
+// they carry no user traffic and would double the table's volume.
+func (o *Observer) RelaySessionClosed(stats realm.RelaySessionStats) {
+	if o == nil || stats.FirstAckMs < 0 {
+		return
+	}
+	now := time.Now()
+	nonce := hex.EncodeToString(stats.Nonce[:])
+	record := Record{
+		AttemptID:        nonce,
+		Nonce:            nonce,
+		Protocol:         o.protocol,
+		RespondMode:      "relay",
+		StartTS:          rfc3339(now.Add(-stats.Duration)),
+		FinishTS:         rfc3339(now),
+		DurationMS:       stats.Duration.Milliseconds(),
+		OK:               stats.ActiveRelay.IsValid(),
+		RelayAcked:       formatAddrs(stats.Acked),
+		RelayOffered:     formatAddrs(stats.Relays),
+		RelayFirstAckMS:  stats.FirstAckMs,
+		RelayBytesIn:     stats.BytesIn,
+		RelayBytesOut:    stats.BytesOut,
+		RelayCloseReason: stats.CloseReason,
+	}
+	if stats.LoopbackAddr.IsValid() {
+		record.RelayLoopbackAddr = stats.LoopbackAddr.String()
+	}
+	if stats.ActiveRelay.IsValid() {
+		record.RelayActive = stats.ActiveRelay.String()
+	}
+	o.sink(record)
+}
+
 func typeName(packetType byte) string {
 	switch packetType {
 	case realm.PunchHello:
@@ -235,4 +286,7 @@ func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-var _ realm.PunchObserver = (*Observer)(nil)
+var (
+	_ realm.PunchObserver        = (*Observer)(nil)
+	_ realm.RelaySessionObserver = (*Observer)(nil)
+)

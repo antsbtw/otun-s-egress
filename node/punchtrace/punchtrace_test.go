@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/antsbtw/sing-quic/hysteria2/realm"
 )
@@ -125,4 +126,55 @@ func TestObserverEvictsWhenFlooded(t *testing.T) {
 	if n > maxPending {
 		t.Errorf("pending grew to %d, cap is %d", n, maxPending)
 	}
+}
+
+// Relay session summary → one "relay" record carrying the loopback address the
+// protocol server saw (the conn_lifecycle source), so nonce joins to user/bytes.
+func TestObserverEmitsRelaySessionRecord(t *testing.T) {
+	var got []Record
+	o := New("hysteria2", func(r Record) { got = append(got, r) })
+
+	winner := mustAddr(t, "198.51.100.7:51830")
+	loser := mustAddr(t, "198.51.100.8:51830")
+	o.RelaySessionClosed(realm.RelaySessionStats{
+		Nonce:        testMetadata().Nonce,
+		Relays:       []netip.AddrPort{winner, loser},
+		Acked:        []netip.AddrPort{winner, loser},
+		ActiveRelay:  winner,
+		FirstAckMs:   120,
+		BytesIn:      5000,
+		BytesOut:     9000,
+		Duration:     90 * time.Second,
+		CloseReason:  "idle",
+		LoopbackAddr: mustAddr(t, "127.0.0.1:40001"),
+	})
+	if len(got) != 1 {
+		t.Fatalf("records = %d, want 1", len(got))
+	}
+	r := got[0]
+	if r.RespondMode != "relay" || !r.OK || r.Nonce != r.AttemptID || r.Nonce == "" {
+		t.Fatalf("unexpected relay record header: %+v", r)
+	}
+	if r.RelayLoopbackAddr != "127.0.0.1:40001" || r.RelayActive != winner.String() {
+		t.Fatalf("loopback/active = %q/%q", r.RelayLoopbackAddr, r.RelayActive)
+	}
+	if r.RelayBytesIn != 5000 || r.RelayBytesOut != 9000 || r.RelayCloseReason != "idle" || r.DurationMS != 90000 {
+		t.Fatalf("unexpected relay counters: %+v", r)
+	}
+	if len(r.PeerCandidates) != 0 {
+		t.Fatalf("relay record must not carry peer_candidates (punch analyses key on it): %v", r.PeerCandidates)
+	}
+
+	// Acked but no data (client raced to the other relay / punched instead): ok=false.
+	o.RelaySessionClosed(realm.RelaySessionStats{Nonce: testMetadata().Nonce, Acked: []netip.AddrPort{loser}, FirstAckMs: 80, CloseReason: "idle"})
+	if len(got) != 2 || got[1].OK || got[1].RelayActive != "" {
+		t.Fatalf("acked-without-data record wrong: %+v", got[len(got)-1])
+	}
+	// Never acked (punch won, client never came): skipped.
+	o.RelaySessionClosed(realm.RelaySessionStats{Nonce: testMetadata().Nonce, FirstAckMs: -1, CloseReason: "no_ack"})
+	if len(got) != 2 {
+		t.Fatalf("no_ack session must be skipped, got %d records", len(got))
+	}
+	var nilObserver *Observer
+	nilObserver.RelaySessionClosed(realm.RelaySessionStats{FirstAckMs: 1})
 }

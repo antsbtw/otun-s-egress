@@ -254,7 +254,7 @@ func (h egressHandler) NewConnectionEx(ctx context.Context, conn net.Conn, sourc
 		defer outbound.Close()
 		h.logger.Info("egress TCP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "tuic"})
+			conn = h.node.meter.Track(uuid, conn, meter.ConnMeta{Destination: destination.String(), Source: source.String(), Protocol: "tuic"})
 		}
 		closeErr = bufio.CopyConn(ctx, conn, outbound)
 	}()
@@ -278,7 +278,7 @@ func (h egressHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketC
 		defer outbound.Close()
 		h.logger.Info("egress UDP user=", userattr.Label(ctx), " -> ", destination)
 		if uuid, ok := h.node.uuidFor(ctx); ok {
-			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String(), Protocol: "tuic"})
+			conn = h.node.meter.TrackPacket(uuid, conn, meter.ConnMeta{Destination: destination.String(), Source: source.String(), Protocol: "tuic"})
 		}
 		closeErr = bufio.CopyPacketConn(ctx, conn, bufio.NewPacketConn(outbound))
 	}()
