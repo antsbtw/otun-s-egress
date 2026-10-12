@@ -28,6 +28,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
+	N "github.com/sagernet/sing/common/network"
 
 	"github.com/gofrs/uuid/v5"
 
@@ -111,6 +112,12 @@ type Config struct {
 	// Logger is optional; a NOP logger is used when nil.
 	Logger logger.ContextLogger
 
+	// Egress optionally replaces how proxied user destinations are dialed
+	// (e.g. an *UpstreamDialer routing via a residential SOCKS5 proxy). Nil —
+	// the default — dials directly from this node, byte-for-byte as before.
+	// Rendezvous/STUN/punch/relay traffic never goes through it.
+	Egress N.Dialer
+
 	// PunchTraceSink optionally turns on receiver-side punch tracing: when
 	// non-nil, every finished punch answer attempt is assembled into a
 	// punchtrace.Record (node/punchtrace) and handed to this sink — the H1
@@ -145,7 +152,7 @@ func New(cfg Config) (Node, error) {
 			RelayAddresses: cfg.RelayAddresses,
 			Resolver:       systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
-			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg,
+			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg, Egress: cfg.Egress,
 			PunchObserver: punchObserver,
 		})
 
@@ -161,6 +168,7 @@ func New(cfg Config) (Node, error) {
 			Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
 			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Meter: cfg.Meter, Logger: lg,
+			Egress: cfg.Egress,
 			PunchObserver: punchObserver,
 		})
 
@@ -177,7 +185,7 @@ func New(cfg Config) (Node, error) {
 			Reality: buildRealityServer(ctx, lg, cfg, hp),
 			UUID:    cfg.UUID,
 			Meter:   cfg.Meter,
-			Handler: egressPipe{lg: lg}.egress, Logger: lg,
+			Handler: egressPipe{lg: lg, dialer: cfg.Egress}.egress, Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -187,7 +195,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password, Meter: cfg.Meter,
-			Handler: trojannode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
+			Handler: trojannode.ConnHandler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -197,7 +205,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password, Meter: cfg.Meter,
-			Handler: ssnode.ConnHandler(egressPipe{lg: lg}.egress), Logger: lg,
+			Handler: ssnode.ConnHandler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -206,8 +214,8 @@ func New(cfg Config) (Node, error) {
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
-			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter,
-			Handler: vmessnode.Handler(egressPipe{lg: lg}.egress), Logger: lg,
+			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter, Egress: cfg.Egress,
+			Handler: vmessnode.Handler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -268,11 +276,20 @@ func tlsParams(cfg Config) (sni string, alpn []string) {
 
 // egressPipe dials the proxied destination and pipes both ways. Used by the
 // TCP-family protocols (reality/trojan/ss/vmess); hy2/tuic egress out directly.
-type egressPipe struct{ lg logger.ContextLogger }
+type egressPipe struct {
+	lg     logger.ContextLogger
+	dialer N.Dialer // nil = dial directly from this node (Config.Egress unset)
+}
 
 func (h egressPipe) egress(ctx context.Context, conn net.Conn, destination M.Socksaddr) {
 	defer conn.Close()
-	out, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", destination.String())
+	var out net.Conn
+	var err error
+	if h.dialer != nil {
+		out, err = h.dialer.DialContext(ctx, N.NetworkTCP, destination)
+	} else {
+		out, err = (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", destination.String())
+	}
 	if err != nil {
 		h.lg.Warn("egress dial ", destination, ": ", err)
 		return
