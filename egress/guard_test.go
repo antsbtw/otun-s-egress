@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing/common/buf"
+	"github.com/sagernet/sing/common/bufio"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -282,5 +283,58 @@ func TestGuardLogRateLimit(t *testing.T) {
 	}
 	if n := g.suppressed["unattributed|bittorrent"]; n != 99 {
 		t.Errorf("suppressed = %d, want 99", n)
+	}
+}
+
+// headroomPC mimics sing's socks AssociatePacketConn: it needs 10 bytes of
+// front headroom and panics (ExtendHeader) if the buffer lacks them.
+type headroomPC struct {
+	N.NetPacketConn
+	wrote chan int
+}
+
+func (h *headroomPC) FrontHeadroom() int { return 10 }
+func (h *headroomPC) WritePacket(b *buf.Buffer, _ M.Socksaddr) error {
+	defer b.Release()
+	b.ExtendHeader(10) // panics on zero headroom, like the prod crash 2026-10-13
+	h.wrote <- b.Len()
+	return nil
+}
+func (h *headroomPC) ReadPacket(*buf.Buffer) (M.Socksaddr, error) { select {} }
+func (h *headroomPC) Close() error                                { return nil }
+
+// onePacketSource yields one packet then blocks.
+type onePacketSource struct {
+	N.PacketConn
+	sent bool
+}
+
+func (s *onePacketSource) ReadPacket(b *buf.Buffer) (M.Socksaddr, error) {
+	if s.sent {
+		select {}
+	}
+	s.sent = true
+	b.Write([]byte("hello-udp"))
+	return M.ParseSocksaddr("8.8.8.8:53"), nil
+}
+func (s *onePacketSource) WritePacket(b *buf.Buffer, _ M.Socksaddr) error { b.Release(); return nil }
+func (s *onePacketSource) Close() error                                   { return nil }
+
+func TestGuardPacketConnForwardsHeadroom(t *testing.T) {
+	inner := &headroomPC{wrote: make(chan int, 1)}
+	pc := &guardPacketConn{inner: inner, g: newGuard(GuardEnforce, logger.NOP()), ctx: context.Background(), firstSeen: map[netip.AddrPort]struct{}{}}
+	if got := N.CalculateFrontHeadroom(pc); got != 10 {
+		t.Fatalf("front headroom = %d, want 10", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go bufio.CopyPacketConn(ctx, &onePacketSource{}, pc) // source → guard → headroom inner
+	select {
+	case n := <-inner.wrote:
+		if n != 10+len("hello-udp") {
+			t.Fatalf("wrote %d bytes", n)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("packet never reached inner conn")
 	}
 }

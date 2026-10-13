@@ -427,6 +427,15 @@ func (c *guardPacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	return c.inner.WriteTo(p, addr)
 }
 
+// FrontHeadroom / RearHeadroom forward the inner conn's header-space needs.
+// sing's copy loop sizes its buffers from the WRITER it sees (this wrapper);
+// without these, an upstream SOCKS5 UDP association (needs 10 bytes to
+// prepend its header) gets zero-headroom buffers and ExtendHeader panics.
+// Deliberately NOT implementing WithUpstreamWriter: that would let the copy
+// loop unwrap past the guard and write to the inner conn directly.
+func (c *guardPacketConn) FrontHeadroom() int { return N.CalculateFrontHeadroom(c.inner) }
+func (c *guardPacketConn) RearHeadroom() int  { return N.CalculateRearHeadroom(c.inner) }
+
 func (c *guardPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
 	return c.inner.ReadPacket(buffer)
 }
