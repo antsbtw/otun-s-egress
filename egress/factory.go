@@ -118,6 +118,11 @@ type Config struct {
 	// Rendezvous/STUN/punch/relay traffic never goes through it.
 	Egress N.Dialer
 
+	// GuardMode controls the abuse guard on the user egress leg (see guard.go):
+	// blocks internal/metadata/self destinations, TCP/25 and BitTorrent.
+	// "" = GuardEnforce; GuardLogOnly to observe; GuardOff = exactly as before.
+	GuardMode GuardMode
+
 	// PunchTraceSink optionally turns on receiver-side punch tracing: when
 	// non-nil, every finished punch answer attempt is assembled into a
 	// punchtrace.Record (node/punchtrace) and handed to this sink — the H1
@@ -143,6 +148,12 @@ func New(cfg Config) (Node, error) {
 		punchObserver = punchtrace.New(cfg.Protocol, cfg.PunchTraceSink)
 	}
 
+	g := newGuard(cfg.GuardMode, lg)
+	// hy2/tuic/vmess dial UDP+TCP through their own Egress option (OS connect
+	// timeout); the TCP-family pipe used a 10s connect timeout — keep both.
+	nodeEgress := g.wrap(cfg.Egress, 0)
+	pipe := egressPipe{lg: lg, dialer: g.wrap(cfg.Egress, 10*time.Second)}
+
 	switch cfg.Protocol {
 	case "hysteria2":
 		sni, alpn := tlsParams(cfg)
@@ -152,7 +163,7 @@ func New(cfg Config) (Node, error) {
 			RelayAddresses: cfg.RelayAddresses,
 			Resolver:       systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), Password: cfg.Password,
-			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg, Egress: cfg.Egress,
+			ObfsPassword: cfg.ObfsPassword, Meter: cfg.Meter, Logger: lg, Egress: nodeEgress,
 			PunchObserver: punchObserver,
 		})
 
@@ -168,7 +179,7 @@ func New(cfg Config) (Node, error) {
 			Resolver: systemResolver, HTTPClient: hc,
 			TLSConfig: buildServerTLS(ctx, lg, sni, alpn, cfg.CertPEM, cfg.KeyPEM), UUID: userUUID,
 			Password: cfg.Password, CongestionControl: cfg.CongestionControl, Meter: cfg.Meter, Logger: lg,
-			Egress: cfg.Egress,
+			Egress:        nodeEgress,
 			PunchObserver: punchObserver,
 		})
 
@@ -185,7 +196,7 @@ func New(cfg Config) (Node, error) {
 			Reality: buildRealityServer(ctx, lg, cfg, hp),
 			UUID:    cfg.UUID,
 			Meter:   cfg.Meter,
-			Handler: egressPipe{lg: lg, dialer: cfg.Egress}.egress, Logger: lg,
+			Handler: pipe.egress, Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -195,7 +206,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Password: cfg.Password, Meter: cfg.Meter,
-			Handler: trojannode.ConnHandler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
+			Handler: trojannode.ConnHandler(pipe.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -205,7 +216,7 @@ func New(cfg Config) (Node, error) {
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
 			WrapTLS: buildWrapServerTLS(ctx, lg), Method: cfg.Method, Password: cfg.Password, Meter: cfg.Meter,
-			Handler: ssnode.ConnHandler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
+			Handler: ssnode.ConnHandler(pipe.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
@@ -214,8 +225,8 @@ func New(cfg Config) (Node, error) {
 			ServerURL: cfg.ServerURL, Token: cfg.Token, RealmID: cfg.RealmID,
 			STUNServers: cfg.STUNServers, RelayAddresses: cfg.RelayAddresses,
 			Resolver: systemResolver, HTTPClient: hc,
-			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter, Egress: cfg.Egress,
-			Handler: vmessnode.Handler(egressPipe{lg: lg, dialer: cfg.Egress}.egress), Logger: lg,
+			WrapTLS: buildWrapServerTLS(ctx, lg), UUID: cfg.UUID, Meter: cfg.Meter, Egress: nodeEgress,
+			Handler: vmessnode.Handler(pipe.egress), Logger: lg,
 			PunchObserver: punchObserver,
 		})
 
